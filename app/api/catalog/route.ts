@@ -172,9 +172,9 @@ export async function PATCH(request: Request) {
       );
     }
 
-    const current = getCatalog() as CatalogMap;
+    const current = await getCatalog();
     const updated = { ...current, [subject]: category };
-    replaceCatalog(updated);
+    await replaceCatalog(updated);
 
     return NextResponse.json({ 
       success: true, 

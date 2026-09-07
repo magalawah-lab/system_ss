@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import { serializeClasses, upsertClasses } from '../../../server/supabase-db';
+import type { ClassItem } from '../../../app/context/SchoolDataContext';
 
 export async function GET() {
   try {
-    const classes = serializeClasses();
+    const classes = await serializeClasses();
     return NextResponse.json(classes);
   } catch (error) {
     console.error('Failed to serialize classes:', error);
@@ -16,7 +17,7 @@ export async function POST(request: Request) {
     const classesData = await request.json() as ClassItem[];
     await upsertClasses(classesData);
     // Return fresh data
-    const updatedClasses = serializeClasses();
+    const updatedClasses = await serializeClasses();
     return NextResponse.json(updatedClasses, { status: 200 });
   } catch (error) {
     console.error('Failed to upsert classes:', error);

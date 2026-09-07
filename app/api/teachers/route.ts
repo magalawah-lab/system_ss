@@ -9,7 +9,7 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as TeacherRecord[] | (Omit<Teacher, 'id'> & { id?: string });
+    const body = await request.json() as Teacher[] | (Omit<Teacher, 'id'> & { id?: string });
 
     if (Array.isArray(body)) {
       await replaceTeachers(body);
