@@ -1,0 +1,158 @@
+Great, I’ll treat that as confirmation to proceed with a full fix verification now: confirm the native `.node` exists, then start dev server and check the startup/API logs for any SQLite init errors.
+        
+            
+toolName: file_search
+            
+status: success
+          
+file_pattern: **/better_sqlite3.node
+          
+
+        
+            
+toolName: search_by_regex
+            
+status: success
+          
+query: ignoredBuilds|better-sqlite3|pendingBuilds
+          
+
+        
+            
+toolName: run_command
+            
+status: running
+          
+command: pnpm dev undefined
+          
+
+        
+            
+toolName: check_command_status
+            
+status: success
+          
+          
+
+        
+            
+toolName: check_command_status
+            
+status: success
+          
+          
+
+        
+            
+toolName: check_command_status
+            
+status: success
+          
+          
+I’ve confirmed the binding is now built and no longer ignored by pnpm; the dev server output is minimal in this sandbox, so I’m validating by hitting the classes API directly to ensure runtime DB access works without that init error.
+        
+            
+toolName: run_command
+            
+status: success
+          
+command: curl.exe -s -o NUL -w "%{http_code}" http://localhost:3000/api/classes undefined
+          
+
+        
+            
+toolName: run_command
+            
+status: success
+          
+command: (Invoke-WebRequest -Uri 'http://localhost:3000/api/classes' -UseBasicParsing).StatusCode undefined
+          
+
+        
+            
+toolName: run_command
+            
+status: success
+          
+command: node -e "const Database=require('better-sqlite3'); const db=new Database('data/_probe.db'); db.close(); console.log('better-sqlite3-ok');" undefined
+          
+
+        
+            
+toolName: apply_patch
+            
+status: failed
+          
+          
+
+        
+            
+toolName: write_to_file
+            
+status: success
+          
+            
+filePath: d:\Projects\system\tmp-better-sqlite3-probe.cjs
+          
+content: undefined
+          
+
+        
+            
+toolName: run_command
+            
+status: success
+          
+command: node tmp-better-sqlite3-probe.cjs undefined
+          
+
+        
+            
+toolName: StopCommand
+            
+status: success
+          
+          
+
+        
+            
+toolName: GetDiagnostics
+            
+status: success
+          
+          
+
+        
+            
+toolName: todo_write
+            
+status: success
+          
+Todos updated: 4 items
+          
+**What That Error Means**
+- `better-sqlite3` is a native module, and the `.node` binding is its compiled binary.
+- When that file is missing, SQLite does not initialize, so DB-backed APIs can fail or fall back to JSON storage instead of `school.db`.
+- Impact to you: risk of startup warnings, `503` on writes (without fallback), and inconsistent persistence backend.
+
+**Root Cause Found**
+- pnpm had this package in ignored builds (`ignoredBuilds`) in `node_modules/.modules.yaml`, so install scripts for `better-sqlite3` were not producing the binary.
+- Your runtime is `Node v24.1.0` / ABI `137`, which is supported by `better-sqlite3@12.9.0`, so the issue was build policy, not unsupported Node.
+
+**What I Fixed**
+- Rebuilt `better-sqlite3` successfully.
+- Verified native binaries now exist:
+  - `d:\Projects\system\node_modules\better-sqlite3\build\Release\better_sqlite3.node`
+  - `d:\Projects\system\node_modules\.pnpm\better-sqlite3@12.9.0\node_modules\better-sqlite3\build\Release\better_sqlite3.node`
+- Verified direct native load works via probe script [tmp-better-sqlite3-probe.cjs](file:///d:/Projects/system/tmp-better-sqlite3-probe.cjs) (`better-sqlite3-ok` output).
+- Verified `/api/classes` responds `200` after rebuild.
+
+**How To Prevent It Going Forward**
+- If this returns on another machine, run:
+  1. `pnpm approve-builds`
+  2. Approve `better-sqlite3`
+  3. `pnpm rebuild better-sqlite3`
+- Keep Node on a supported major (`20/22/23/24/25`) and avoid install modes that skip lifecycle builds.
+
+**Note**
+- I left a small probe file: [tmp-better-sqlite3-probe.cjs](file:///d:/Projects/system/tmp-better-sqlite3-probe.cjs). You can delete it once done.

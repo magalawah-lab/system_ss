@@ -1,0 +1,182 @@
+"use client";
+
+import React, { createContext, useContext, useEffect, useState } from "react";
+
+export type UserRole = "admin" | "teacher";
+
+export type User = {
+  role: "admin" | "teacher";
+  id: string;
+  name: string;
+  email: string;
+};
+
+type AuthContextType = {
+  currentUser: User | null;
+  login: (email: string, password: string) => Promise<boolean>;
+  logout: () => void;
+  isAuthenticated: boolean;
+  isAdmin: boolean;
+  isTeacher: boolean;
+  isLoading: boolean;
+};
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const LS_AUTH = "school:auth:currentUser";
+const LS_ADMINS = "school:admins";
+
+// Initialize default admin if none exists
+function initializeDefaultAdmin() {
+  if (typeof window === "undefined") return;
+  try {
+    const existing = localStorage.getItem(LS_ADMINS);
+    if (!existing) {
+      const defaultAdmin = {
+        id: "admin1",
+        name: "Administrator",
+        email: "admin@school.com",
+        password: "admin123",
+      };
+      localStorage.setItem(LS_ADMINS, JSON.stringify([defaultAdmin]));
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Load persisted auth state on mount
+  useEffect(() => {
+    try {
+      initializeDefaultAdmin();
+      const stored = localStorage.getItem(LS_AUTH);
+      if (stored) {
+        const user = JSON.parse(stored) as User;
+        setCurrentUser(user);
+      }
+    } catch (e) {
+      console.error("Auth init error:", e);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // Persist auth state whenever it changes
+  useEffect(() => {
+    if (!isLoading) {
+      try {
+        if (currentUser) {
+          localStorage.setItem(LS_AUTH, JSON.stringify(currentUser));
+        } else {
+          localStorage.removeItem(LS_AUTH);
+        }
+      } catch (e) {
+        console.error("Auth persist error:", e);
+      }
+    }
+  }, [currentUser, isLoading]);
+
+  const login = async (email: string, password: string): Promise<boolean> => {
+    try {
+      // Try admin login
+      const adminsRaw = localStorage.getItem(LS_ADMINS);
+      if (adminsRaw) {
+        const admins = JSON.parse(adminsRaw);
+        const admin = admins.find((a: any) => a.email?.toLowerCase() === email.toLowerCase());
+        if (admin) {
+          if (admin.password && admin.password !== password) {
+            console.log("Admin login failed: incorrect password");
+            return false;
+          }
+          const user: User = {
+            role: "admin",
+            id: admin.id,
+            name: admin.name,
+            email: admin.email,
+          };
+          setCurrentUser(user);
+          console.log("Admin login successful:", user.email);
+          return true;
+        }
+      }
+
+      // Try teacher login — fetch the authoritative list from the server so newly
+      // added teachers are always found (localStorage can be stale or not yet synced).
+      let teachers: any[] = [];
+      try {
+        const res = await fetch("/api/teachers");
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data)) teachers = data;
+        }
+      } catch (e) {
+        console.warn("Failed to fetch teachers from server, falling back to localStorage:", e);
+      }
+      if (teachers.length === 0) {
+        const raw = localStorage.getItem("school:teachers");
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) teachers = parsed;
+          } catch (e) {
+            // ignore malformed localStorage
+          }
+        }
+      }
+
+      const teacher = teachers.find((t: any) => t.email?.toLowerCase() === email.toLowerCase());
+      if (teacher) {
+        if (teacher.password && teacher.password !== password) {
+          console.log("Teacher login failed: incorrect password");
+          return false;
+        }
+        const user: User = {
+          role: "teacher",
+          id: teacher.id,
+          name: teacher.name,
+          email: teacher.email || "",
+        };
+        setCurrentUser(user);
+        console.log("Teacher login successful:", user.email);
+        return true;
+      } else {
+        console.log("Teacher not found. Available teachers:", teachers.map((t: any) => t.email));
+      }
+
+      console.log("Login failed: email not found in admins or teachers");
+      return false;
+    } catch (e) {
+      console.error("Login error:", e);
+      return false;
+    }
+  };
+
+  const logout = () => {
+    setCurrentUser(null);
+  };
+
+  return (
+    <AuthContext.Provider
+      value={{
+        currentUser,
+        login,
+        logout,
+        isAuthenticated: currentUser !== null,
+        isAdmin: currentUser?.role === "admin",
+        isTeacher: currentUser?.role === "teacher",
+        isLoading,
+      }}
+    >
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth() {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used within an AuthProvider");
+  return ctx;
+}
