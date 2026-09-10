@@ -6,6 +6,7 @@ create table if not exists public.school_state (
   academic_years jsonb not null default '[]'::jsonb,
   current_academic_year_id text not null default '',
   current_term_id text not null default '',
+  revision bigint not null default 0,
   updated_at timestamptz not null default now()
 );
 

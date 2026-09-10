@@ -27,6 +27,8 @@ export async function POST(request: Request) {
     return Response.json({ success: true });
   } catch (error) {
     console.error('Backup restore error:', error);
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    const message = error instanceof Error ? error.message : String(error);
+    const status = message.includes('Supabase server credentials') ? 503 : 400;
+    return Response.json({ error: message }, { status });
   }
 }

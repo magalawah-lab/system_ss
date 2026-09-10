@@ -1,8 +1,23 @@
 "use client";
 
 import React, { useState } from "react";
-import ContextMenu from "../components/ContextMenu";
 import { useSchoolData } from "../context/SchoolDataContext";
+import { useAuth } from "../context/SupabaseAuthContext";
+
+type BackupData = {
+  classes: Array<{ name?: string; level?: string }>;
+  teachers: unknown[];
+  catalog: Record<string, unknown>;
+  academicYears: unknown[];
+  [key: string]: unknown;
+};
+
+type BackupMetadata = {
+  totalClasses: number;
+  totalTeachers: number;
+  totalAcademicYears: number;
+  catalogEntries: number;
+};
 
 export default function Settings() {
   const [theme, setTheme] = useState("system");
@@ -11,17 +26,56 @@ export default function Settings() {
   const [restoreStatus, setRestoreStatus] = useState<string>("");
   const [isBackupLoading, setIsBackupLoading] = useState(false);
   const [isRestoreLoading, setIsRestoreLoading] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordStatus, setPasswordStatus] = useState("");
+  const [isPasswordLoading, setIsPasswordLoading] = useState(false);
   const { saveChanges } = useSchoolData();
+  const { changePassword } = useAuth();
+
+  async function handleChangePassword(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPasswordStatus("");
+
+    if (newPassword.length < 8) {
+      setPasswordStatus("New password must be at least 8 characters.");
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      setPasswordStatus("New passwords do not match.");
+      return;
+    }
+
+    setIsPasswordLoading(true);
+    try {
+      const result = await changePassword(currentPassword, newPassword);
+      if (!result.success) {
+        setPasswordStatus(result.error || "Could not change password.");
+        return;
+      }
+
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setPasswordStatus("Password changed successfully.");
+    } finally {
+      setIsPasswordLoading(false);
+    }
+  }
 
   // Validate backup file structure
-  const validateBackupData = (data: any): { valid: boolean; message?: string } => {
+  const validateBackupData = (data: unknown): { valid: boolean; message?: string } => {
     if (!data) {
       return { valid: false, message: "No data provided" };
     }
 
+    const backupData = data as Partial<BackupData>;
+
     // Check for required top-level properties
     const requiredKeys = ['classes', 'teachers', 'catalog', 'academicYears'];
-    const missingKeys = requiredKeys.filter(key => !(key in data));
+    const missingKeys = requiredKeys.filter(key => !(key in backupData));
     
     if (missingKeys.length > 0) {
       return { 
@@ -31,22 +85,22 @@ export default function Settings() {
     }
 
     // Validate data types
-    if (!Array.isArray(data.classes)) {
+    if (!Array.isArray(backupData.classes)) {
       return { valid: false, message: "Classes must be an array" };
     }
-    if (!Array.isArray(data.teachers)) {
+    if (!Array.isArray(backupData.teachers)) {
       return { valid: false, message: "Teachers must be an array" };
     }
-    if (typeof data.catalog !== 'object') {
+    if (typeof backupData.catalog !== 'object' || backupData.catalog === null) {
       return { valid: false, message: "Catalog must be an object" };
     }
-    if (!Array.isArray(data.academicYears)) {
+    if (!Array.isArray(backupData.academicYears)) {
       return { valid: false, message: "Academic years must be an array" };
     }
 
     // Validate classes structure
-    if (data.classes.length > 0) {
-      const firstClass = data.classes[0];
+    if (backupData.classes.length > 0) {
+      const firstClass = backupData.classes[0];
       if (!firstClass.name || !firstClass.level) {
         return { 
           valid: false, 
@@ -82,7 +136,7 @@ export default function Settings() {
         throw new Error("Received non-JSON response from server");
       }
 
-      const data = await response.json();
+      const data = await response.json() as BackupData;
       
       // Validate the data structure
       const validation = validateBackupData(data);
@@ -169,15 +223,15 @@ export default function Settings() {
       const raw = await restoreFile.text();
       
       // Parse JSON
-      let payload: any;
+      let payload: BackupData & { version?: string; data?: BackupData; metadata?: BackupMetadata };
       try {
-        payload = JSON.parse(raw);
-      } catch (parseError) {
+        payload = JSON.parse(raw) as BackupData & { version?: string; data?: BackupData; metadata?: BackupMetadata };
+      } catch {
         throw new Error("Invalid JSON format. Please check the file.");
       }
 
       // Check if it's the new backup format (with version and metadata)
-      let dataToRestore: any;
+      let dataToRestore: BackupData;
       if (payload.version && payload.data) {
         // New format
         dataToRestore = payload.data;
@@ -317,6 +371,57 @@ export default function Settings() {
       </div>
 
       <div className="settings-grid">
+        <section className="settings-card">
+          <div className="card-header">
+            <div className="header-icon">🔒</div>
+            <h3>Change Password</h3>
+          </div>
+          <div className="card-content">
+            <form className="password-form" onSubmit={handleChangePassword}>
+              <label>
+                Current password
+                <input
+                  type="password"
+                  value={currentPassword}
+                  onChange={(event) => setCurrentPassword(event.target.value)}
+                  autoComplete="current-password"
+                  required
+                />
+              </label>
+              <label>
+                New password
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(event) => setNewPassword(event.target.value)}
+                  autoComplete="new-password"
+                  minLength={8}
+                  required
+                />
+              </label>
+              <label>
+                Confirm new password
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(event) => setConfirmPassword(event.target.value)}
+                  autoComplete="new-password"
+                  minLength={8}
+                  required
+                />
+              </label>
+              <button className="btn btn-primary" type="submit" disabled={isPasswordLoading}>
+                {isPasswordLoading ? "Changing..." : "Change Password"}
+              </button>
+              {passwordStatus && (
+                <p className={`status-msg ${passwordStatus.includes("successfully") ? "" : "error"}`}>
+                  {passwordStatus}
+                </p>
+              )}
+            </form>
+          </div>
+        </section>
+
         {/* Appearance Section */}
         <section className="settings-card">
           <div className="card-header">
@@ -495,6 +600,32 @@ export default function Settings() {
           font-weight: 500;
           color: var(--text-main);
         }
+
+        .password-form {
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 1rem;
+          align-items: end;
+        }
+        .password-form label {
+          display: grid;
+          gap: 0.4rem;
+          color: var(--text-main);
+          font-weight: 500;
+          font-size: 0.9rem;
+        }
+        .password-form input {
+          padding: 0.6rem 0.75rem;
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          background: var(--background);
+          color: var(--text-main);
+          font: inherit;
+        }
+        .password-form .status-msg {
+          grid-column: 1 / -1;
+          margin: 0;
+        }
         
         .select-input {
           padding: 0.6rem 1rem;
@@ -650,6 +781,9 @@ export default function Settings() {
           .setting-row {
             flex-direction: column;
             align-items: stretch;
+          }
+          .password-form {
+            grid-template-columns: 1fr;
           }
           .select-input {
             min-width: 100%;

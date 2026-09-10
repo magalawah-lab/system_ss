@@ -23,6 +23,7 @@ type AuthContextType = {
   isAdmin: boolean;
   isTeacher: boolean;
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
 };
 
@@ -30,14 +31,18 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const supabase = createClient();
 
-const getErrorMessage = (error: any): string => {
-  if (error?.message === 'Invalid login credentials') {
+const getErrorMessage = (error: unknown): string => {
+  const message = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+    ? error.message
+    : '';
+
+  if (message === 'Invalid login credentials') {
     return 'Invalid email or password. Please try again.';
   }
-  if (error?.message === 'Failed to fetch' || error?.message?.includes('fetch')) {
+  if (message === 'Failed to fetch' || message.includes('fetch')) {
     return 'Unable to connect to the server. Please check your internet connection.';
   }
-  return error?.message || 'An unexpected error occurred. Please try again.';
+  return message || 'An unexpected error occurred. Please try again.';
 };
 
 export function SupabaseAuthProvider({ children }: { children: React.ReactNode }) {
@@ -92,7 +97,7 @@ export function SupabaseAuthProvider({ children }: { children: React.ReactNode }
           });
         }
       }
-    } catch (error) {
+    } catch {
       // Silently fail
     }
   };
@@ -111,7 +116,7 @@ export function SupabaseAuthProvider({ children }: { children: React.ReactNode }
           setSession(session);
           await loadUserProfile(session.user);
         }
-      } catch (error) {
+      } catch {
         // Silently fail
       } finally {
         setIsLoading(false);
@@ -157,7 +162,37 @@ export function SupabaseAuthProvider({ children }: { children: React.ReactNode }
       }
 
       return { success: false, error: 'Login failed' };
-    } catch (error: any) {
+    } catch (error: unknown) {
+      return { success: false, error: getErrorMessage(error) };
+    }
+  };
+
+  const changePassword = async (currentPassword: string, newPassword: string): Promise<{ success: boolean; error?: string }> => {
+    if (!currentPassword || !newPassword) {
+      return { success: false, error: 'Current and new passwords are required.' };
+    }
+
+    try {
+      if (!user?.email) {
+        return { success: false, error: 'No authenticated user was found.' };
+      }
+
+      const { error: reauthenticationError } = await supabase.auth.signInWithPassword({
+        email: user.email,
+        password: currentPassword,
+      });
+
+      if (reauthenticationError) {
+        return { success: false, error: 'Current password is incorrect.' };
+      }
+
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) {
+        return { success: false, error: getErrorMessage(error) };
+      }
+
+      return { success: true };
+    } catch (error: unknown) {
       return { success: false, error: getErrorMessage(error) };
     }
   };
@@ -167,7 +202,7 @@ export function SupabaseAuthProvider({ children }: { children: React.ReactNode }
       await supabase.auth.signOut();
       setUser(null);
       setSession(null);
-    } catch (error) {
+    } catch {
       // Silently fail
     }
   };
@@ -181,6 +216,7 @@ export function SupabaseAuthProvider({ children }: { children: React.ReactNode }
     isAdmin: user?.role === 'admin',
     isTeacher: user?.role === 'teacher',
     login,
+    changePassword,
     logout,
   };
 

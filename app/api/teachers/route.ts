@@ -3,8 +3,13 @@ import { getTeachers, replaceTeachers } from '../../../server/supabase-db';
 import type { Teacher } from '../../../app/context/SchoolDataContext';
 
 export async function GET() {
-  const teachers = await getTeachers() as Teacher[];
-  return NextResponse.json(teachers);
+  try {
+    const teachers = await getTeachers() as Teacher[];
+    return NextResponse.json(teachers);
+  } catch (error) {
+    console.error('Teachers GET error:', error);
+    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 503 });
+  }
 }
 
 export async function POST(request: Request) {
