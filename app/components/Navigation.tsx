@@ -31,7 +31,7 @@ export default function Navigation() {
   const [isSidebarLoading, setSidebarLoading] = useState(false);
 
   useEffect(() => {
-    document.body.classList.toggle("has-sidebar", isAuthenticated);
+    document.body.classList.toggle("has-sidebar", isAuthenticated && isAdmin);
 
     return () => {
       document.body.classList.remove("has-sidebar");
@@ -180,7 +180,7 @@ export default function Navigation() {
           {/* Right: Controls */}
           <div className="nav-right">
             {/* Academic Year Selector */}
-            <div className="nav-item">
+            <div className="nav-item nav-year-selector">
               <AcademicYearSelector compact showLabels={false} />
             </div>
 
@@ -256,7 +256,7 @@ export default function Navigation() {
       </nav>
 
       {/* Sidebar */}
-      <aside className="context-sidebar">
+      <aside className={`context-sidebar ${!isAdmin ? 'teacher-sidebar-hidden' : ''}`}>
         {activeTab === 'Academic' && (
           <>
             <div className="sidebar-header">
@@ -621,6 +621,10 @@ export default function Navigation() {
           box-shadow: 2px 0 8px rgba(0,0,0,0.05);
         }
 
+        .teacher-sidebar-hidden {
+          display: none;
+        }
+
         .sidebar-header {
           margin-bottom: 1rem;
           padding-bottom: 0.75rem;
@@ -819,6 +823,11 @@ export default function Navigation() {
           }
 
           .context-sidebar {
+            display: none;
+          }
+
+          .nav-year-selector,
+          .search-wrapper {
             display: none;
           }
 

@@ -185,16 +185,6 @@ export default function TeacherDashboard() {
               <h3>Total Classes</h3>
               <div className="kpi-value" style={{ color: 'var(--primary)' }}>{teacherAssignments.length}</div>
             </div>
-            <div className="card kpi-card">
-              <h3>Pending Assessments</h3>
-              <div className="kpi-value" style={{ color: 'var(--accent)' }}>3</div>
-              <div className="kpi-trend">Due this week</div>
-            </div>
-            <div className="card kpi-card">
-              <h3>Avg. Attendance</h3>
-              <div className="kpi-value" style={{ color: 'var(--secondary)' }}>94%</div>
-              <div className="kpi-trend positive">↑ 2% vs last week</div>
-            </div>
           </div>
 
           {teacherAssignments.length === 0 ? (
@@ -347,6 +337,8 @@ export default function TeacherDashboard() {
           padding: 1rem;
           max-width: 1400px;
           margin: 0 auto;
+          width: 100%;
+          min-width: 0;
         }
 
         .teacher-dashboard-loading {
@@ -484,15 +476,19 @@ export default function TeacherDashboard() {
           display: flex;
           justify-content: space-between;
           align-items: flex-end;
+          gap: 1rem;
           margin-bottom: 2rem;
           padding-bottom: 1rem;
           border-bottom: 1px solid var(--border);
         }
-        .quick-actions { display: flex; gap: 0.75rem; }
+        .dashboard-header > div:first-child { min-width: 0; }
+        .dashboard-header h1,
+        .dashboard-header p { overflow-wrap: anywhere; }
+        .quick-actions { display: flex; gap: 0.75rem; flex-wrap: wrap; justify-content: flex-end; }
         
         .kpi-grid {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+          grid-template-columns: minmax(0, 260px);
           gap: 1.5rem;
           margin-bottom: 2.5rem;
         }
@@ -527,6 +523,7 @@ export default function TeacherDashboard() {
           display: flex;
           justify-content: space-between;
           align-items: center;
+          min-width: 0;
           padding: 1rem;
           border: 1px solid var(--border);
           border-radius: 6px;
@@ -542,8 +539,8 @@ export default function TeacherDashboard() {
           background: #EBF5FB;
           box-shadow: 0 0 0 1px var(--primary);
         }
-        .assessment-info { display: flex; flex-direction: column; }
-        .assessment-name { font-weight: 600; color: var(--text-main); }
+        .assessment-info { display: flex; flex-direction: column; min-width: 0; }
+        .assessment-name { font-weight: 600; color: var(--text-main); overflow-wrap: anywhere; }
         .assessment-date { font-size: 0.8rem; color: var(--text-muted); }
         .assessment-meta { display: flex; align-items: center; gap: 1rem; }
         .max-score { font-size: 0.85rem; color: var(--text-muted); background: var(--background); padding: 0.2rem 0.5rem; border-radius: 4px; }
@@ -572,6 +569,7 @@ export default function TeacherDashboard() {
           .quick-actions {
             display: grid;
             grid-template-columns: 1fr 1fr;
+            width: 100%;
           }
 
           .quick-actions .btn {
@@ -588,6 +586,15 @@ export default function TeacherDashboard() {
           .dashboard-period .academic-year-selector,
           .dashboard-period > div:last-child {
             width: 100%;
+          }
+
+          .kpi-grid {
+            grid-template-columns: 1fr;
+            margin-bottom: 1.25rem;
+          }
+
+          .kpi-card {
+            padding: 1rem;
           }
 
           .class-header {
@@ -616,6 +623,7 @@ export default function TeacherDashboard() {
           .assessment-meta {
             justify-content: space-between;
             width: 100%;
+            flex-wrap: wrap;
           }
 
           .assessment-meta .btn {

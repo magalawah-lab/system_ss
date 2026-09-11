@@ -835,6 +835,19 @@ body.has-sidebar .main-content {
     display: none;
   }
 
+  .logout-button {
+    min-width: 36px !important;
+    width: 36px;
+    height: 36px;
+    justify-content: center;
+    gap: 0 !important;
+    padding: 0.4rem !important;
+  }
+
+  .logout-label {
+    display: none;
+  }
+
   .search-results {
     min-width: 180px;
     right: -20px;
