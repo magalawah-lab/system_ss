@@ -298,6 +298,14 @@ async function writeState(state: State): Promise<State> {
     .single();
 
   if (error) {
+    if (error.code === 'PGRST116' && state.revision === 0) {
+      const { data: inserted, error: insertError } = await getSupabaseAdmin()
+        .from('school_state')
+        .insert(payload)
+        .select('*')
+        .single();
+      if (!insertError) return inserted as State;
+    }
     const message = error.code === 'PGRST116'
       ? 'The data changed in another session. Reload the page before saving again.'
       : error.message;
@@ -327,117 +335,41 @@ export async function seedDefaults(): Promise<void> {
 }
 
 export async function serializeClasses(): Promise<any[]> {
-  return readRelationalClasses();
+  return (await readState()).classes;
 }
 
 export async function upsertClasses(classes: any[], force = false): Promise<void> {
-  const current = await readRelationalClasses();
+  const state = await readState();
+  const current = state.classes;
   if (!force && classes.length === 0 && current.length > 0) return;
-  const client = getSupabaseAdmin();
-  for (const table of ['scores', 'assessments', 'stream_subjects', 'students', 'streams', 'classes']) {
-    const { error } = await client.from(table).delete().neq('id', UUID_DELETE_SENTINEL);
-    if (error) throw new Error(`Supabase ${table} delete failed: ${error.message}`);
-  }
-  await insertRelationalClasses(Array.isArray(classes) ? classes : []);
+  await writeState({ ...state, classes: Array.isArray(classes) ? classes : [] });
 }
 
 export async function getTeachers(): Promise<any[]> {
-  const [teacherRows, profiles] = await Promise.all([
-    queryRows('teachers'),
-    queryRows('user_profiles'),
-  ]);
-  const profilesById = new Map(profiles.map((profile: any) => [profile.id, profile]));
-  return teacherRows.map((teacher: any) => {
-    const profile = profilesById.get(teacher.user_id) || profilesById.get(teacher.id) || {};
-    return {
-      id: teacher.id,
-      user_id: teacher.user_id,
-      name: profile.name || profile.email || 'Unnamed',
-      email: profile.email || undefined,
-      initials: teacher.initials || undefined,
-    };
-  });
+  return (await readState()).teachers;
 }
 
 export async function replaceTeachers(teachers: any[]): Promise<void> {
-  const client = getSupabaseAdmin();
-  const rows = (Array.isArray(teachers) ? teachers : []).map((teacher: any) => ({
-    id: relationalId(teacher.id, 'teacher', `${teacher.email || ''}:${teacher.name || ''}`),
-    user_id: isUuid(teacher.user_id) ? teacher.user_id : null,
-    initials: teacher.initials || null,
-  }));
-  if (rows.length > 0) {
-    const { error } = await client.from('teachers').upsert(rows, { onConflict: 'id' });
-    if (error) throw new Error(`Supabase teachers write failed: ${error.message}`);
-  }
-  const retainedIds = rows.map((teacher: any) => teacher.id);
-  const { data: existing, error: existingError } = await client.from('teachers').select('id');
-  if (existingError) throw new Error(`Supabase teachers read failed: ${existingError.message}`);
-  const removedIds = (existing || []).map((teacher: any) => teacher.id).filter((id: string) => !retainedIds.includes(id));
-  if (removedIds.length > 0) {
-    const { error } = await client.from('teachers').delete().in('id', removedIds);
-    if (error) throw new Error(`Supabase teachers delete failed: ${error.message}`);
-  }
+  const state = await readState();
+  await writeState({ ...state, teachers: Array.isArray(teachers) ? teachers : [] });
 }
 
 export async function getCatalog(): Promise<Record<string, SubjectCategory>> {
-  const rows = await queryRows('catalog');
-  return Object.fromEntries(rows.map((row: any) => [row.subject_name, row.category as SubjectCategory]));
+  return (await readState()).catalog;
 }
 
 export async function replaceCatalog(catalog: Record<string, SubjectCategory>): Promise<void> {
-  const client = getSupabaseAdmin();
-  const { data: existing, error: readError } = await client.from('catalog').select('id,subject_name,level');
-  if (readError) throw new Error(`Supabase catalog read failed: ${readError.message}`);
-  const existingByKey = new Map((existing || []).map((row: any) => [`${row.level || ''}:${row.subject_name}`, row]));
-  const rows = Object.entries(catalog || {}).map(([key, category]) => {
-    const level = key.startsWith('O:') || key.startsWith('A:') ? key.slice(0, 1) : null;
-    const subject_name = level ? key.slice(2) : key;
-    const existingRow = existingByKey.get(`${level || ''}:${subject_name}`) || existingByKey.get(`:${subject_name}`);
-    const id = existingRow?.id || stableId('catalog', `${level || ''}:${subject_name}`);
-    return { id, subject_name, level: level || existingRow?.level || 'O', category };
-  });
-  if (rows.length > 0) {
-    const { error } = await client.from('catalog').upsert(rows, { onConflict: 'id' });
-    if (error) throw new Error(`Supabase catalog write failed: ${error.message}`);
-  }
+  const state = await readState();
+  await writeState({ ...state, catalog: catalog && typeof catalog === 'object' ? catalog : {} });
 }
 
 export async function getAcademicYears(): Promise<any[]> {
-  const [yearRows, termRows] = await Promise.all([queryRows('academic_years'), queryRows('terms')]);
-  return yearRows.map((year: any) => ({
-    id: year.id,
-    name: year.name,
-    startDate: year.start_date || '',
-    endDate: year.end_date || '',
-    isActive: year.is_active,
-    terms: termRows.filter((term: any) => term.academic_year_id === year.id).map((term: any) => ({
-      id: term.id,
-      name: term.name,
-      number: term.number,
-      startDate: term.start_date || '',
-      endDate: term.end_date || '',
-      isActive: term.is_active,
-    })),
-  }));
+  return (await readState()).academic_years;
 }
 
 export async function saveAcademicYears(years: any[]): Promise<void> {
-  const client = getSupabaseAdmin();
-  const yearRows = (Array.isArray(years) ? years : []).map((year: any) => ({ id: year.id, name: year.name, start_date: year.startDate || null, end_date: year.endDate || null, is_active: Boolean(year.isActive) }));
-  const termRows = (Array.isArray(years) ? years : []).flatMap((year: any) => (year.terms || []).map((term: any) => ({ id: term.id, academic_year_id: year.id, name: term.name, number: term.number, start_date: term.startDate || null, end_date: term.endDate || null, is_active: Boolean(term.isActive) })));
-  const { error: termDeleteError } = await client.from('terms').delete().neq('id', UUID_DELETE_SENTINEL);
-  if (termDeleteError) throw new Error(`Supabase terms delete failed: ${termDeleteError.message}`);
-  const { error: yearDeleteError } = await client.from('academic_years').delete().neq('id', UUID_DELETE_SENTINEL);
-  if (yearDeleteError) throw new Error(`Supabase academic_years delete failed: ${yearDeleteError.message}`);
-  if (yearRows.length > 0) {
-    const { error } = await client.from('academic_years').insert(yearRows);
-    if (error) throw new Error(`Supabase academic_years write failed: ${error.message}`);
-  }
-  if (termRows.length > 0) {
-    const { error } = await client.from('terms').insert(termRows);
-    if (error) throw new Error(`Supabase terms write failed: ${error.message}`);
-  }
+  const state = await readState();
+  await writeState({ ...state, academic_years: Array.isArray(years) ? years : [] });
 }
 
 export async function getCurrentAcademicYearId(): Promise<string> {
@@ -452,89 +384,96 @@ export async function getCurrentTermId(): Promise<string> {
 }
 
 export async function setCurrentAcademicYearId(id: string): Promise<void> {
-  const client = getSupabaseAdmin();
-  const { error } = await client.from('academic_years').update({ is_active: false }).neq('id', id);
-  if (error) throw new Error(`Supabase academic_years write failed: ${error.message}`);
-  const { error: activeError } = await client.from('academic_years').update({ is_active: true }).eq('id', id);
-  if (activeError) throw new Error(`Supabase academic_years write failed: ${activeError.message}`);
+  const state = await readState();
+  const academicYears = state.academic_years.map((year: any) => ({ ...year, isActive: year.id === id }));
+  await writeState({ ...state, academic_years: academicYears, current_academic_year_id: id });
 }
 
 export async function setCurrentTermId(id: string): Promise<void> {
-  const client = getSupabaseAdmin();
-  const { data: term, error: termError } = await client.from('terms').select('academic_year_id').eq('id', id).maybeSingle();
-  if (termError) throw new Error(`Supabase terms read failed: ${termError.message}`);
-  if (!term) throw new Error('Term not found');
-  const { error } = await client.from('terms').update({ is_active: false }).eq('academic_year_id', term.academic_year_id).neq('id', id);
-  if (error) throw new Error(`Supabase terms write failed: ${error.message}`);
-  const { error: activeError } = await client.from('terms').update({ is_active: true }).eq('id', id);
-  if (activeError) throw new Error(`Supabase terms write failed: ${activeError.message}`);
+  const state = await readState();
+  const academicYears = state.academic_years.map((year: any) => ({
+    ...year,
+    terms: (year.terms || []).map((term: any) => ({ ...term, isActive: term.id === id })),
+  }));
+  await writeState({ ...state, academic_years: academicYears, current_term_id: id });
 }
 
-async function updateAssessment(assessmentId: string, update: (assessment: any) => void): Promise<void> {
-  const classes = await readRelationalClasses();
-  for (const cls of classes) {
-    const assessment = (cls.assessments || []).find((item: any) => item.id === assessmentId);
-    if (assessment) {
-      update(assessment);
-      await upsertClasses(classes);
-      return;
-    }
-  }
-  throw new Error('Assessment not found');
+async function updateAssessmentInState(assessmentId: string, update: (assessment: any) => void): Promise<void> {
+  const state = await readState();
+  const classes = state.classes.map((classItem: any) => ({
+    ...classItem,
+    assessments: (classItem.assessments || []).map((assessment: any) => {
+      if (assessment.id !== assessmentId) return assessment;
+      const updated = { ...assessment };
+      update(updated);
+      return updated;
+    }),
+  }));
+  const found = classes.some((classItem: any) => (classItem.assessments || []).some((assessment: any) => assessment.id === assessmentId));
+  if (!found) throw new Error('Assessment not found');
+  await writeState({ ...state, classes });
 }
 
 export async function updateAssessmentScore(assessmentId: string, studentId: string, score: number | null): Promise<void> {
-  const client = getSupabaseAdmin();
-  const { data: existing } = await client.from('scores').select('id').eq('assessment_id', assessmentId).eq('student_id', studentId).is('subject_name', null).is('paper_name', null).maybeSingle();
-  const payload = { assessment_id: assessmentId, student_id: studentId, subject_name: null, paper_name: null, score };
-  const { error } = existing
-    ? await client.from('scores').update(payload).eq('id', existing.id)
-    : await client.from('scores').insert({ id: stableId('score', `${assessmentId}:${studentId}::`), ...payload });
-  if (error) throw new Error(`Supabase scores write failed: ${error.message}`);
+  await updateAssessmentInState(assessmentId, (assessment) => {
+    assessment.scores = { ...(assessment.scores || {}), [studentId]: score };
+  });
 }
 
 export async function updateAssessmentSubjectScore(assessmentId: string, subjectName: string, studentId: string, score: number | null): Promise<void> {
-  const client = getSupabaseAdmin();
-  const { data: existing } = await client.from('scores').select('id').eq('assessment_id', assessmentId).eq('student_id', studentId).eq('subject_name', subjectName).is('paper_name', null).maybeSingle();
-  const payload = { assessment_id: assessmentId, student_id: studentId, subject_name: subjectName, paper_name: null, score };
-  const { error } = existing
-    ? await client.from('scores').update(payload).eq('id', existing.id)
-    : await client.from('scores').insert({ id: stableId('score', `${assessmentId}:${studentId}:${subjectName}:`), ...payload });
-  if (error) throw new Error(`Supabase scores write failed: ${error.message}`);
+  await updateAssessmentInState(assessmentId, (assessment) => {
+    assessment.subjectScores = { ...(assessment.subjectScores || {}) };
+    assessment.subjectScores[subjectName] = { ...(assessment.subjectScores[subjectName] || {}), [studentId]: score };
+  });
 }
 
 export async function updateAssessmentPaperScore(assessmentId: string, subjectName: string, paperName: string, studentId: string, score: number | null): Promise<void> {
-  const client = getSupabaseAdmin();
-  const { data: existing } = await client.from('scores').select('id').eq('assessment_id', assessmentId).eq('student_id', studentId).eq('subject_name', subjectName).eq('paper_name', paperName).maybeSingle();
-  const payload = { assessment_id: assessmentId, student_id: studentId, subject_name: subjectName, paper_name: paperName, score };
-  const { error } = existing
-    ? await client.from('scores').update(payload).eq('id', existing.id)
-    : await client.from('scores').insert({ id: stableId('score', `${assessmentId}:${studentId}:${subjectName}:${paperName}`), ...payload });
-  if (error) throw new Error(`Supabase scores write failed: ${error.message}`);
+  await updateAssessmentInState(assessmentId, (assessment) => {
+    assessment.paperScores = { ...(assessment.paperScores || {}) };
+    assessment.paperScores[subjectName] = { ...(assessment.paperScores[subjectName] || {}) };
+    assessment.paperScores[subjectName][paperName] = {
+      ...(assessment.paperScores[subjectName][paperName] || {}),
+      [studentId]: score,
+    };
+  });
 }
 
 export async function updateStudentSubjects(studentId: string, subjects: string[], optionalSubjects: string[]): Promise<void> {
-  const { error } = await getSupabaseAdmin().from('students').update({ subjects, optional_subjects: optionalSubjects }).eq('id', studentId);
-  if (error) throw new Error(`Supabase students write failed: ${error.message}`);
+  const state = await readState();
+  const classes = state.classes.map((classItem: any) => ({
+    ...classItem,
+    streams: (classItem.streams || []).map((stream: any) => ({
+      ...stream,
+      students: (stream.students || []).map((student: any) => (
+        student.id === studentId ? { ...student, subjects, optionalSubjects } : student
+      )),
+    })),
+  }));
+  await writeState({ ...state, classes });
 }
 
 export async function updateTeacherAssignment(className: string, streamName: string, type: 'subject' | 'class', teacherId: string | null, subjectName?: string, initials?: string): Promise<void> {
-  const client = getSupabaseAdmin();
-  const { data: cls, error: classError } = await client.from('classes').select('id').eq('name', className).maybeSingle();
-  if (classError) throw new Error(`Supabase classes read failed: ${classError.message}`);
-  if (!cls) throw new Error('Class not found');
-  const { data: stream, error: streamError } = await client.from('streams').select('id').eq('class_id', cls.id).eq('name', streamName).maybeSingle();
-  if (streamError) throw new Error(`Supabase streams read failed: ${streamError.message}`);
-  if (!stream) throw new Error('Stream not found');
-  if (type === 'class') {
-    const { error } = await client.from('streams').update({ class_teacher_id: teacherId || null }).eq('id', stream.id);
-    if (error) throw new Error(`Supabase streams write failed: ${error.message}`);
-  } else {
-    const { data: subject } = await client.from('subjects').select('id').eq('name', subjectName || '').maybeSingle();
-    if (!subject) throw new Error('Subject not found');
-    const { error } = await client.from('stream_subjects').update({ teacher_id: teacherId || null }).eq('stream_id', stream.id).eq('subject_id', subject.id);
-    if (error) throw new Error(`Supabase stream_subjects write failed: ${error.message}`);
-  }
+  const state = await readState();
+  let found = false;
+  const classes = state.classes.map((classItem: any) => {
+    if (classItem.name !== className) return classItem;
+    return {
+      ...classItem,
+      streams: (classItem.streams || []).map((stream: any) => {
+        if (stream.name !== streamName) return stream;
+        found = true;
+        if (type === 'class') return { ...stream, classTeacherId: teacherId || undefined };
+        return {
+          ...stream,
+          subjects: (stream.subjects || []).map((subject: any) => (
+            subject.name === subjectName ? { ...subject, teacherId: teacherId || undefined, initials } : subject
+          )),
+        };
+      }),
+    };
+  });
+  if (!found) throw new Error('Class stream not found');
+  await writeState({ ...state, classes });
 }
 
 export async function exportBackup(): Promise<any> {
@@ -567,12 +506,8 @@ export async function getStudents(streamId?: string): Promise<any[]> {
 }
 
 export async function getStorageDiagnostics() {
-  const [classes, teachers, catalog, academicYears, scoreRows] = await Promise.all([
-    serializeClasses(),
-    getTeachers(),
-    getCatalog(),
-    getAcademicYears(),
-    queryRows('scores'),
+  const [classes, teachers, catalog, academicYears] = await Promise.all([
+    serializeClasses(), getTeachers(), getCatalog(), getAcademicYears(),
   ]);
   const streams = classes.flatMap((item: any) => item.streams || []);
   const assessments = classes.flatMap((item: any) => item.assessments || []);
@@ -591,7 +526,10 @@ export async function getStorageDiagnostics() {
       catalogEntries: Object.keys(catalog).length,
       academicYears: academicYears.length,
       terms: terms.length,
-      scores: scoreRows.length,
+      scores: assessments.reduce((total: number, assessment: any) => total
+        + Object.keys(assessment.scores || {}).length
+        + Object.values(assessment.subjectScores || {}).reduce((sum: number, scores: any) => sum + Object.keys(scores || {}).length, 0)
+        + Object.values(assessment.paperScores || {}).reduce((sum: number, papers: any) => sum + Object.values(papers || {}).reduce((paperSum: number, scores: any) => paperSum + Object.keys(scores || {}).length, 0), 0), 0),
     },
   };
 }

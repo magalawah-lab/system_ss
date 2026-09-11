@@ -810,18 +810,15 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     setIsSaving(true);
     setSyncError(null);
     try {
-      const syncPromises = [];
       if (dirty.classes) {
-        syncPromises.push(syncToServer('/classes', classes, `${API_URL}/classes`, 'classes'));
+        await syncToServer('/classes', classes, `${API_URL}/classes`, 'classes');
       }
       if (dirty.teachers) {
-        syncPromises.push(syncToServer('/teachers', teachers, `${API_URL}/teachers`, 'teachers'));
+        await syncToServer('/teachers', teachers, `${API_URL}/teachers`, 'teachers');
       }
       if (dirty.catalog) {
-        syncPromises.push(syncToServer('/catalog', catalog, `${API_URL}/catalog`, 'catalog'));
+        await syncToServer('/catalog', catalog, `${API_URL}/catalog`, 'catalog');
       }
-
-      await Promise.all(syncPromises);
       setDirty({ classes: false, teachers: false, catalog: false });
       setSyncError(null);
     } catch (e) {
