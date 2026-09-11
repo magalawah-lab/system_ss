@@ -759,6 +759,14 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     }
   };
 
+  const classSaveQueue = useRef(Promise.resolve());
+  const persistClassesImmediately = useCallback((nextClasses: ClassItem[]) => {
+    classSaveQueue.current = classSaveQueue.current
+      .catch(() => undefined)
+      .then(() => syncToServer('/classes', nextClasses, `${API_URL}/classes`, 'classes'));
+    return classSaveQueue.current;
+  }, [syncToServer]);
+
   const setClasses = useCallback((updater: React.SetStateAction<ClassItem[]>) => {
     setDirty(d => ({ ...d, classes: true }));
     setClassesState((prev) => {
@@ -1405,17 +1413,25 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
       scores: assessment.scores ?? {},
       subjectScores: assessment.subjectScores ?? {},
     };
-    setClasses((prev) => prev.map((cls, index) => (
+    const nextClasses = classes.map((cls, index) => (
       index !== classIndex ? cls : { ...cls, assessments: [...(cls.assessments ?? []), nextAssessment] }
-    )));
+    ));
+    setClasses(nextClasses);
+    persistClassesImmediately(nextClasses).catch((error) => {
+      console.warn('Assessment creation sync failed; the buffered save will retry:', error);
+    });
     return id;
-  }, [setClasses, currentAcademicYearId, currentTermId]);
+  }, [classes, setClasses, persistClassesImmediately, currentAcademicYearId, currentTermId]);
 
   const removeAssessmentFromClass = useCallback((classIndex: number, assessmentId: string) => {
-    setClasses((prev) => prev.map((cls, index) => (
+    const nextClasses = classes.map((cls, index) => (
       index !== classIndex ? cls : { ...cls, assessments: (cls.assessments ?? []).filter((assessment) => assessment.id !== assessmentId) }
-    )));
-  }, [setClasses]);
+    ));
+    setClasses(nextClasses);
+    persistClassesImmediately(nextClasses).catch((error) => {
+      console.warn('Assessment deletion sync failed; the buffered save will retry:', error);
+    });
+  }, [classes, setClasses, persistClassesImmediately]);
 
   const setScoreForAssessment = useCallback((classIndex: number, assessmentId: string, studentId: string, score: number | null) => {
     setClasses((prev) => prev.map((cls, index) => {
@@ -1517,7 +1533,7 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
   }, [setClasses, API_URL]);
 
   const updateAssessmentInClass = useCallback((classIndex: number, assessmentId: string, updates: Partial<Assessment>) => {
-    setClasses((prev) => prev.map((cls, index) => {
+    const nextClasses = classes.map((cls, index) => {
       if (index !== classIndex) return cls;
       return {
         ...cls,
@@ -1525,8 +1541,12 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
           assessment.id !== assessmentId ? assessment : { ...assessment, ...updates }
         )),
       };
-    }));
-  }, [setClasses]);
+    });
+    setClasses(nextClasses);
+    persistClassesImmediately(nextClasses).catch((error) => {
+      console.warn('Assessment update sync failed; the buffered save will retry:', error);
+    });
+  }, [classes, setClasses, persistClassesImmediately]);
 
   const getAssessmentReportsForClass = useCallback((classIndex: number) => {
     const selectedClass = classes[classIndex];
