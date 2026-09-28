@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useSchoolData } from "../../../context/SchoolDataContext";
 
-export default function PrintAllReportCardsPage() {
+function PrintAllReportCardsContent() {
   const [isHydrated, setIsHydrated] = useState(false);
   const search = useSearchParams();
   const classIndex = Number(search.get("classIndex")) || 0;
@@ -645,5 +645,13 @@ export default function PrintAllReportCardsPage() {
         }
       `}</style>
     </div>
+  );
+}
+
+export default function PrintAllReportCardsPage() {
+  return (
+    <Suspense fallback={<div className="p-8 text-center">Loading reports...</div>}>
+      <PrintAllReportCardsContent />
+    </Suspense>
   );
 }
