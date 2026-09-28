@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useSchoolData } from "../../../context/SchoolDataContext";
 
-export default function ReportCardPDF() {
+function ReportCardPDFContent() {
   const [isHydrated, setIsHydrated] = useState(false);
   const search = useSearchParams();
   const classIndex = Number(search.get("classIndex")) || 0;
@@ -620,5 +620,13 @@ export default function ReportCardPDF() {
         }
       `}</style>
     </div>
+  );
+}
+
+export default function ReportCardPDF() {
+  return (
+    <Suspense fallback={<div className="p-8 text-center">Loading report...</div>}>
+      <ReportCardPDFContent />
+    </Suspense>
   );
 }
