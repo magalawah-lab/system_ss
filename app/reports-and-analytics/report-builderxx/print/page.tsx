@@ -1,25 +1,31 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useSchoolData } from "../../../context/SchoolDataContext";
 
 export default function PrintAllReportCardsPage() {
+  return (
+    <Suspense fallback={<div style={{ padding: '2rem', textAlign: 'center' }}>Loading...</div>}>
+      <PrintAllReportCardsContent />
+    </Suspense>
+  );
+}
+
+function PrintAllReportCardsContent() {
   const [isHydrated, setIsHydrated] = useState(false);
   const search = useSearchParams();
   const classIndex = Number(search.get("classIndex")) || 0;
   const streamIndex = Number(search.get("streamIndex")) || 0;
   const term = Number(search.get("term")) || 2;
 
-  const { classes, teachers, catalog, currentAcademicYearId, currentTermId, academicYears } = useSchoolData();
+  const { classes, teachers, catalog, currentAcademicYearId, currentTermId } = useSchoolData();
 
   const cls = classes[classIndex];
   const stream = cls?.streams?.[streamIndex];
   const students = stream?.students ?? [];
   const selectedAcademicYearId = search.get("academicYearId") || currentAcademicYearId;
   const selectedTermId = search.get("termId") || currentTermId;
-  const selectedYear = academicYears.find((academicYear) => academicYear.id === selectedAcademicYearId);
-  const selectedTerm = selectedYear?.terms.find((academicTerm) => academicTerm.id === selectedTermId);
   const assessments = useMemo(() => {
     return (cls?.assessments ?? []).filter((assessment) =>
       assessment.academicYearId === selectedAcademicYearId &&
@@ -162,8 +168,7 @@ export default function PrintAllReportCardsPage() {
     return <div className="p-8 text-center">Report data not found.</div>;
   }
 
-  const year = selectedYear?.name || new Date().getFullYear().toString();
-  const termName = selectedTerm?.name || `TERM ${term}`;
+  const year = new Date().getFullYear();
 
   return (
     <div className="print-all-container">
@@ -217,7 +222,7 @@ export default function PrintAllReportCardsPage() {
             {/* Report Title */}
             <div className="report-title">
               <h2>END OF TERM ASSESSMENT REPORT</h2>
-              <p className="report-subtitle">{termName}, {year}</p>
+              <p className="report-subtitle">{year}</p>
             </div>
 
             {/* Student Details */}
@@ -236,7 +241,7 @@ export default function PrintAllReportCardsPage() {
               </div>
               <div className="detail-item">
                 <span className="label">TERM:</span>
-                <span className="value">{termName}, {year}</span>
+                <span className="value">TERM {term}, {year}</span>
               </div>
             </div>
 

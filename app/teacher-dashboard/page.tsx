@@ -295,7 +295,7 @@ export default function TeacherDashboard() {
           <div className="card">
             <h3 className="section-title">Quick Tools</h3>
             <div className="tool-links">
-              <Link href="/reports-and-analytics/report-builder" className="tool-link">
+              <Link href="/reports-and-analytics" className="tool-link">
                 <span className="tool-icon">📄</span>
                 <div className="tool-info">
                   <span className="tool-name">Report Builder</span>
