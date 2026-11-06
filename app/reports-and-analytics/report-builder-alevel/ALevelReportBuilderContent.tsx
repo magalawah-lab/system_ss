@@ -1,18 +1,19 @@
 "use client";
 
-import React, { useCallback, useState, useMemo, useEffect } from "react";
+import React, { useCallback, useState, useMemo } from "react";
 import { Info } from "lucide-react";
 import Link from "next/link";
 import { useSchoolData } from "../../context/SchoolDataContext";
-import { ALEVEL_SUBJECTS_CONFIG, ALEVEL_GRADING_SCALE } from "../../context/alevelConfig";
+import { ALEVEL_SUBJECTS_CONFIG } from "../../context/alevelConfig";
 import AcademicYearSelector from "../../components/AcademicYearSelector";
-import { calculateUACESubjectGrade, calculateSubsidiaryGradeFromScores } from '../../utils/alevelGrades';
+import { calculateFinalPaperScore, calculatePaperGrade, calculateUACESubjectGrade, calculateSubsidiaryGradeFromScores } from '../../utils/alevelGrades';
 
 export default function ALevelReportBuilder() {
   const { classes, teachers, catalog, currentAcademicYearId, currentTermId } = useSchoolData();
   const [selectedClassIndex, setSelectedClassIndex] = useState<number | null>(null);
   const [selectedStreamIndex, setSelectedStreamIndex] = useState<number | null>(null);
   const [selectedStudentId, setSelectedStudentId] = useState<string>("");
+  const [assessmentSelection, setAssessmentSelection] = useState<{ scope: string; ids: string[] } | null>(null);
   const [reportTitle, setReportTitle] = useState("UACE END OF TERM ASSESSMENT REPORT");
   
   // Filter only A-Level classes
@@ -28,8 +29,23 @@ export default function ALevelReportBuilder() {
       assessment.termId === currentTermId
     );
   }, [currentClass, currentAcademicYearId, currentTermId]);
+  const assessmentIds = useMemo(() => assessments.map((assessment) => assessment.id), [assessments]);
+  const assessmentScope = JSON.stringify([
+    selectedClassIndex,
+    currentAcademicYearId,
+    currentTermId,
+    assessmentIds,
+  ]);
+  const selectedAssessmentIds = assessmentSelection?.scope === assessmentScope
+    ? assessmentSelection.ids
+    : assessmentIds;
 
-  const canGenerate = selectedStudentId !== "" && currentClass && currentStream;
+  const selectedAssessments = useMemo(() => {
+    const selectedIds = new Set(selectedAssessmentIds);
+    return assessments.filter((assessment) => selectedIds.has(assessment.id));
+  }, [assessments, selectedAssessmentIds]);
+
+  const canGenerate = selectedStudentId !== "" && currentClass && currentStream && selectedAssessments.length > 0;
   const selectedStudent = students.find((s) => s.id === selectedStudentId);
 
   function getTeacherInitials(teacherId?: string): string {
@@ -48,14 +64,14 @@ export default function ALevelReportBuilder() {
 
     if (config) {
       config.papers.forEach(paper => {
-        const scores = assessments
-          .map(asm => asm.paperScores?.[subjectName]?.[paper]?.[sid])
-          .filter((s): s is number => typeof s === 'number');
+        const finalPaperScore = calculateFinalPaperScore(selectedAssessments.map((assessment) => ({
+          score: assessment.paperScores?.[subjectName]?.[paper]?.[sid],
+          maxScore: assessment.maxScore,
+        })));
 
-        if (scores.length > 0) {
-          const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
-          const roundedScore = Math.round(avg);
-          const paperGrade = ALEVEL_GRADING_SCALE.find(s => roundedScore >= s.min)?.grade || '';
+        if (finalPaperScore !== null) {
+          const roundedScore = finalPaperScore;
+          const paperGrade = calculatePaperGrade(roundedScore);
           paperScores[paper] = roundedScore.toString();
           paperDetails[paper] = { score: roundedScore.toString(), grade: paperGrade };
           if (paperGrade) {
@@ -96,7 +112,7 @@ export default function ALevelReportBuilder() {
       paperDetails,
       type: config?.type || 'principal',
     };
-  }, [assessments]);
+  }, [selectedAssessments]);
 
   // Generate report rows for selected student using UNEB rules
   const reportRows = useMemo(() => {
@@ -171,6 +187,7 @@ export default function ALevelReportBuilder() {
       title: reportTitle,
       academicYearId: currentAcademicYearId,
       termId: currentTermId,
+      assessmentIds: selectedAssessmentIds.join(","),
     });
     window.open(`/reports-and-analytics/report-builder-alevel/pdf?${params}`, "_blank");
   };
@@ -251,6 +268,46 @@ export default function ALevelReportBuilder() {
               </select>
             </div>
 
+            <fieldset className="rounded border p-3" disabled={assessments.length === 0}>
+              <legend className="px-1 text-sm font-medium">Assessments to include</legend>
+              {assessments.length > 0 ? (
+                <div className="max-h-48 space-y-2 overflow-y-auto">
+                  {assessments.map((assessment) => (
+                    <label key={assessment.id} className="flex cursor-pointer items-start gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={selectedAssessmentIds.includes(assessment.id)}
+                        onChange={() => {
+                          setAssessmentSelection((current) => {
+                            const currentIds = current?.scope === assessmentScope
+                              ? current.ids
+                              : assessments.map((item) => item.id);
+                            return {
+                              scope: assessmentScope,
+                              ids: currentIds.includes(assessment.id)
+                                ? currentIds.filter((id) => id !== assessment.id)
+                                : [...currentIds, assessment.id],
+                            };
+                          });
+                        }}
+                      />
+                      <span>
+                        {assessment.name}
+                        {assessment.maxScore ? ` (out of ${assessment.maxScore})` : ""}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">No assessments for this class, year, and term.</p>
+              )}
+              {assessments.length > 0 && (
+                <p className="mt-2 text-xs text-gray-500">
+                  Scores use each assessment&apos;s maximum mark before averaging. Assessments without a maximum are treated as percentages.
+                </p>
+              )}
+            </fieldset>
+
             <button
               onClick={handleGeneratePDF}
               disabled={!canGenerate}
@@ -286,7 +343,7 @@ export default function ALevelReportBuilder() {
                           {Object.entries(row.paperDetails).map(([paper, data]) => (
                             <div key={paper} className="flex gap-2 items-center">
                               <span className="font-medium">{paper}:</span>
-                              <span>{data.score}</span>
+                              <span>{data.score}{data.score !== "—" ? "%" : ""}</span>
                               <span className="text-gray-500">({data.grade})</span>
                             </div>
                           ))}

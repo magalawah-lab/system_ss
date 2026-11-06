@@ -7,6 +7,7 @@ import ProtectedRoute from "../../components/ProtectedRoute";
 import { useSchoolData, ClassItem, Student, Assessment, SubjectEntry } from "../../context/SchoolDataContext";
 import { useAuth } from "../../context/SupabaseAuthContext";
 import AcademicYearSelector from "../../components/AcademicYearSelector";
+import { studentTakesSubject as studentIsEnrolledInSubject } from "../../utils/studentSubjects";
 
 // Subject name shortening map
 const subjectShortcuts: Record<string, string> = {
@@ -223,12 +224,15 @@ function ConsolidatedMarksheetContent() {
   }, []);
 
   const studentTakesSubject = useCallback((student: Student, subjectName: string) => {
-    // Check if subject is optional using level-specific catalog key
-    const levelKey = `${level}:${subjectName}`;
-    const isOptional = catalog?.[levelKey] === "optional" || 
-                      (!catalog?.[levelKey] && catalog?.[subjectName] === "optional");
-    return !isOptional || student.optionalSubjects.includes(subjectName);
-  }, [catalog, level]);
+    const subjectEntry = (currentStream?.subjects ?? []).find(
+      (entry) => (typeof entry === "string" ? entry : entry.name) === subjectName
+    );
+    return studentIsEnrolledInSubject(student, subjectName, {
+      level,
+      catalog,
+      subjectEntry,
+    });
+  }, [catalog, level, currentStream?.subjects]);
 
   const getScore = useCallback((assessmentId: string, subjectName: string, studentId: string) => {
     const asm = assessments.find(a => a.id === assessmentId);

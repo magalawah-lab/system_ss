@@ -3,8 +3,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useSchoolData } from "../../context/SchoolDataContext";
-import { ALEVEL_SUBJECTS_CONFIG, ALEVEL_GRADING_SCALE } from "../../context/alevelConfig";
-import { calculateUACESubjectGrade, calculateSubsidiaryGradeFromScores } from '../../utils/alevelGrades';
+import { ALEVEL_SUBJECTS_CONFIG } from "../../context/alevelConfig";
+import { calculateFinalPaperScore, calculatePaperGrade, calculateUACESubjectGrade, calculateSubsidiaryGradeFromScores } from '../../utils/alevelGrades';
 
 
 export default function ALevelReportCardPDF() {
@@ -17,6 +17,7 @@ export default function ALevelReportCardPDF() {
   const { classes, teachers, currentAcademicYearId, currentTermId, academicYears } = useSchoolData();
   const selectedAcademicYearId = search.get("academicYearId") || currentAcademicYearId;
   const selectedTermId = search.get("termId") || currentTermId;
+  const assessmentIdsParam = search.get("assessmentIds");
   const cls = classes[classIndex];
   const stream = cls?.streams?.[streamIndex];
   const student = stream?.students?.find((s) => s.id === studentId) ?? null;
@@ -24,11 +25,15 @@ export default function ALevelReportCardPDF() {
   const selectedTerm = selectedYear?.terms.find((term) => term.id === selectedTermId);
 
   const assessments = useMemo(() => {
-    return (cls?.assessments ?? []).filter((assessment) =>
+    const termAssessments = (cls?.assessments ?? []).filter((assessment) =>
       assessment.academicYearId === selectedAcademicYearId &&
       assessment.termId === selectedTermId
     );
-  }, [cls, selectedAcademicYearId, selectedTermId]);
+    if (assessmentIdsParam === null) return termAssessments;
+
+    const selectedIds = new Set(assessmentIdsParam.split(",").filter(Boolean));
+    return termAssessments.filter((assessment) => selectedIds.has(assessment.id));
+  }, [cls, selectedAcademicYearId, selectedTermId, assessmentIdsParam]);
 
   useEffect(() => {
     setIsHydrated(true);
@@ -54,15 +59,15 @@ export default function ALevelReportCardPDF() {
 
     if (config) {
       config.papers.forEach(paper => {
-        const scores = assessments
-          .map(asm => asm.paperScores?.[subjectName]?.[paper]?.[sid])
-          .filter((s): s is number => typeof s === 'number');
+        const finalPaperScore = calculateFinalPaperScore(assessments.map((assessment) => ({
+          score: assessment.paperScores?.[subjectName]?.[paper]?.[sid],
+          maxScore: assessment.maxScore,
+        })));
 
-        if (scores.length > 0) {
-          const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
-          const roundedScore = Math.round(avg);
+        if (finalPaperScore !== null) {
+          const roundedScore = finalPaperScore;
           // Paper grade uses the same D1-F9 scale for principal and subsidiary.
-          const paperGrade = ALEVEL_GRADING_SCALE.find(s => roundedScore >= s.min)?.grade || '';
+          const paperGrade = calculatePaperGrade(roundedScore);
           paperScores[paper] = roundedScore.toString();
           paperDetails[paper] = { score: roundedScore.toString(), grade: paperGrade };
           if (paperGrade) {
@@ -240,7 +245,7 @@ export default function ALevelReportCardPDF() {
           <tr>
             <th className="col-subject">SUBJECT</th>
             <th className="col-paper">PAPER</th>
-            <th className="col-marks">MARKS</th>
+            <th className="col-marks">FINAL PAPER SCORE (%)</th>
             <th className="col-paper-grade">PAPER GRADE</th>
             <th className="col-subject-grade">SUBJECT GRADE</th>
             <th className="col-comment">COMMENT</th>
@@ -267,7 +272,7 @@ export default function ALevelReportCardPDF() {
                     </td>
                   )}
                   <td className="cell-paper-name">{paper}</td>
-                  <td className="cell-marks">{data.score}</td>
+                  <td className="cell-marks">{data.score}{data.score !== '—' ? '%' : ''}</td>
                   <td className="cell-paper-grade">{data.grade}</td>
                   {showSubjectGrade && (
                     <td className="cell-subject-grade" rowSpan={rowSpan}>
@@ -320,15 +325,15 @@ export default function ALevelReportCardPDF() {
       <div className="grading-scale">
         <div className="scale-title">GRADING SCALE</div>
         <div className="scale-grid">
-          <div className="scale-item"><span className="scale-grade">D1</span><span className="scale-range">85 - 100</span></div>
-          <div className="scale-item"><span className="scale-grade">D2</span><span className="scale-range">75 - 84</span></div>
-          <div className="scale-item"><span className="scale-grade">C3</span><span className="scale-range">70 - 74</span></div>
-          <div className="scale-item"><span className="scale-grade">C4</span><span className="scale-range">60 - 69</span></div>
-          <div className="scale-item"><span className="scale-grade">C5</span><span className="scale-range">50 - 59</span></div>
-          <div className="scale-item"><span className="scale-grade">C6</span><span className="scale-range">40 - 49</span></div>
-          <div className="scale-item"><span className="scale-grade">P7</span><span className="scale-range">35 - 39</span></div>
-          <div className="scale-item"><span className="scale-grade">P8</span><span className="scale-range">31 - 34</span></div>
-          <div className="scale-item"><span className="scale-grade">F9</span><span className="scale-range">0 - 30</span></div>
+          <div className="scale-item"><span className="scale-grade">D1</span><span className="scale-range">90 - 100</span></div>
+          <div className="scale-item"><span className="scale-grade">D2</span><span className="scale-range">80 - 89</span></div>
+          <div className="scale-item"><span className="scale-grade">C3</span><span className="scale-range">75 - 79</span></div>
+          <div className="scale-item"><span className="scale-grade">C4</span><span className="scale-range">65 - 74</span></div>
+          <div className="scale-item"><span className="scale-grade">C5</span><span className="scale-range">60 - 64</span></div>
+          <div className="scale-item"><span className="scale-grade">C6</span><span className="scale-range">50 - 59</span></div>
+          <div className="scale-item"><span className="scale-grade">P7</span><span className="scale-range">45 - 49</span></div>
+          <div className="scale-item"><span className="scale-grade">P8</span><span className="scale-range">40 - 44</span></div>
+          <div className="scale-item"><span className="scale-grade">F9</span><span className="scale-range">0 - 39</span></div>
         </div>
         <div className="scale-note">* Principal subjects use D1-F9 scale. Subsidiary subjects use D1-F9 scale.</div>
       </div>

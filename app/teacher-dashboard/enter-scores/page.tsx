@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useAuth } from "../../context/SupabaseAuthContext";
 import { useSchoolData, Student, Assessment, toSubjectName } from "../../context/SchoolDataContext";
 import AcademicYearSelector from "../../components/AcademicYearSelector";
+import { studentTakesSubject } from "../../utils/studentSubjects";
 
 function EnterScoresContent() {
   const { currentUser, isAuthenticated, isTeacher } = useAuth();
@@ -236,17 +237,16 @@ function EnterScoresContent() {
   // Filter students based on class level:
   // - A-Level: only students whose assigned subjects include the selected subject.
   // - O-Level: optional subjects must be selected by the student; compulsory show all.
-  const isALevel = currentClass?.level === 'A';
-  const isOptionalSubject = catalog?.[selectedSubject] === "optional";
-  const filteredStudents = (currentStream.students ?? []).filter((student: Student) => {
-    if (isALevel) {
-      return (student.subjects ?? []).includes(selectedSubject);
-    }
-    if (isOptionalSubject) {
-      return student.optionalSubjects.includes(selectedSubject);
-    }
-    return true;
-  });
+  const subjectEntry = (currentStream.subjects ?? []).find(
+    (entry) => toSubjectName(entry) === selectedSubject
+  );
+  const filteredStudents = (currentStream.students ?? []).filter((student: Student) =>
+    studentTakesSubject(student, selectedSubject, {
+      level: currentClass.level,
+      catalog,
+      subjectEntry,
+    })
+  );
 
   // Determine which columns to show based on screen size
   const showIdColumn = !isMobile;

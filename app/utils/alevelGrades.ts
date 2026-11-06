@@ -53,6 +53,28 @@ export function calculatePaperGrade(score: number): string {
 }
 
 /**
+ * Average assessment scores as percentages, using each assessment's maximum
+ * score when available. Scores without a maximum are treated as percentages.
+ */
+export function calculateFinalPaperScore(
+  scores: Array<{ score: number | null | undefined; maxScore?: number }>
+): number | null {
+  const percentages = scores
+    .filter((entry): entry is { score: number; maxScore?: number } =>
+      typeof entry.score === 'number' && Number.isFinite(entry.score)
+    )
+    .map(({ score, maxScore }) =>
+      typeof maxScore === 'number' && Number.isFinite(maxScore) && maxScore > 0
+        ? (score / maxScore) * 100
+        : score
+    );
+
+  if (percentages.length === 0) return null;
+
+  return Math.round(percentages.reduce((total, percentage) => total + percentage, 0) / percentages.length);
+}
+
+/**
  * Calculate UACE Subject Grade from paper grades for PRINCIPAL subjects.
  * Uses the UNEB cross-matching rules in UNEB_ALevel_Grading_Summary.md.
  * Returns subject grade in A, B, C, D, E, O, F format.

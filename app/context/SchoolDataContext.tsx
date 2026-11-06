@@ -258,7 +258,10 @@ function normalizeClasses(input: any): ClassItem[] {
                 name: String(sub?.name ?? ''),
                 initials: sub?.initials,
                 teacherId: sub?.teacherId,
-                category: sub?.category || 'optional',
+                // Do not invent "optional" — missing category is resolved via catalog.
+                category: sub?.category === 'compulsory' || sub?.category === 'optional'
+                  ? sub.category
+                  : undefined,
                 papers: Array.isArray(sub?.papers) ? sub.papers : undefined
               }
             ),
