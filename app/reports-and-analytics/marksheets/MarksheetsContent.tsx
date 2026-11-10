@@ -4,6 +4,7 @@ import { useCallback, useMemo, useState, useEffect } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useSchoolData, SubjectEntry, Assessment } from "../../context/SchoolDataContext";
+import { studentTakesSubject } from "../../utils/studentSubjects";
 
 type ViewMode = 'classlist' | 'marksheet' | 'term' | 'completion';
 
@@ -86,8 +87,11 @@ export default function MarksheetsPage() {
       rows = students.map((student, idx) => {
         let missingCount = 0;
         const status = subjects.map(sub => {
-          const isOptional = catalog?.[sub.name] === 'optional';
-          const hasSubject = !isOptional || student.optionalSubjects.includes(sub.name);
+          const hasSubject = studentTakesSubject(student, sub.name, {
+            level: currentClass?.level ?? 'O',
+            catalog,
+            subjectEntry: sub,
+          });
           if (!hasSubject) return 'N/A';
           
           const score = assessment.subjectScores?.[sub.name]?.[student.id] ?? assessment.scores?.[student.id];
@@ -267,8 +271,11 @@ export default function MarksheetsPage() {
                           {subjects.map(sub => {
                             const assessment = assessments.find(a => a.id === selectedAssessmentId) || assessments[0];
                             const score = assessment?.subjectScores?.[sub.name]?.[student.id] ?? assessment?.scores?.[student.id];
-                            const isOptional = catalog?.[sub.name] === 'optional';
-                            const hasSubject = !isOptional || student.optionalSubjects.includes(sub.name);
+                            const hasSubject = studentTakesSubject(student, sub.name, {
+                              level: currentClass?.level ?? 'O',
+                              catalog,
+                              subjectEntry: sub,
+                            });
                             
                             if (!hasSubject) return <td key={sub.name} className="empty-cell">—</td>;
                             
@@ -287,8 +294,11 @@ export default function MarksheetsPage() {
                           {subjects.map(sub => {
                             const assessment = assessments.find(a => a.id === selectedAssessmentId) || assessments[0];
                             const score = assessment?.subjectScores?.[sub.name]?.[student.id] ?? assessment?.scores?.[student.id];
-                            const isOptional = catalog?.[sub.name] === 'optional';
-                            const hasSubject = !isOptional || student.optionalSubjects.includes(sub.name);
+                            const hasSubject = studentTakesSubject(student, sub.name, {
+                              level: currentClass?.level ?? 'O',
+                              catalog,
+                              subjectEntry: sub,
+                            });
                             
                             if (!hasSubject) return <td key={sub.name} className="empty-cell">—</td>;
                             
@@ -314,8 +324,11 @@ export default function MarksheetsPage() {
                                 subCount++;
                               }
                             });
-                            const isOptional = catalog?.[sub.name] === 'optional';
-                            const hasSubject = !isOptional || student.optionalSubjects.includes(sub.name);
+                            const hasSubject = studentTakesSubject(student, sub.name, {
+                              level: currentClass?.level ?? 'O',
+                              catalog,
+                              subjectEntry: sub,
+                            });
 
                             if (!hasSubject) return <td key={sub.name} className="empty-cell">—</td>;
                             

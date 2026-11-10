@@ -11,6 +11,7 @@ import ContextMenu from "../components/ContextMenu";
 import ProtectedRoute from "../components/ProtectedRoute";
 import { ALEVEL_SUBJECTS_CONFIG } from "../context/alevelConfig";
 import { useSchoolData, Student, Stream, Teacher } from "../context/SchoolDataContext";
+import { isSubjectOptional } from "../utils/studentSubjects";
 
 type ScheduleItem = { day: string; time: string; subject: string };
 
@@ -372,10 +373,9 @@ export default function ClassManagement() {
   const catalogSubjects = Object.keys(catalog).filter(key => !key.startsWith('O:') && !key.startsWith('A:')).sort();
   const currentStream = currentClass?.streams.find((s) => s.name === selectedStream);
   const availableSubjects = catalogSubjects.filter((s) => !currentStream?.subjects?.some((sub) => sub.name === s));
-  const availableOptionalSubjects = (currentStream?.subjects || []).map((sub: any) => (typeof sub === 'string' ? sub : sub.name)).filter((name) => {
-    const levelKey = `${level}:${name}`;
-    return catalog[levelKey] === 'optional' || (!catalog[levelKey] && catalog[name] === 'optional');
-  });
+  const availableOptionalSubjects = (currentStream?.subjects || [])
+    .filter((sub: any) => isSubjectOptional(typeof sub === 'string' ? sub : sub.name, { level, catalog, subjectEntry: sub }))
+    .map((sub: any) => (typeof sub === 'string' ? sub : sub.name));
 
   useEffect(() => {
     // compute available subjects for the current stream without depending on transient objects

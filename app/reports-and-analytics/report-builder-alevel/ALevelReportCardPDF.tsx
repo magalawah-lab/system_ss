@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useSchoolData } from "../../context/SchoolDataContext";
 import { ALEVEL_SUBJECTS_CONFIG } from "../../context/alevelConfig";
-import { calculateFinalPaperScore, calculatePaperGrade, calculateUACESubjectGrade, calculateSubsidiaryGradeFromScores } from '../../utils/alevelGrades';
+import { calculateFinalPaperScore, calculatePaperGrade, calculateUACESubjectGrade, calculateSubsidiaryGrade } from '../../utils/alevelGrades';
 
 
 export default function ALevelReportCardPDF() {
@@ -55,7 +55,6 @@ export default function ALevelReportCardPDF() {
     const paperGrades: string[] = [];
     const paperScores: Record<string, string> = {};
     const paperDetails: Record<string, { score: string; grade: string }> = {};
-    const numericPaperScores: number[] = [];
 
     if (config) {
       config.papers.forEach(paper => {
@@ -73,7 +72,6 @@ export default function ALevelReportCardPDF() {
           if (paperGrade) {
             paperGrades.push(paperGrade);
           }
-          numericPaperScores.push(roundedScore);
         } else {
           paperScores[paper] = '—';
           paperDetails[paper] = { score: '—', grade: '—' };
@@ -82,14 +80,14 @@ export default function ALevelReportCardPDF() {
     }
 
     // Subject grade:
-    // - Subsidiary: binary O/F from the average of all paper scores (>= 50% -> O).
-    // - Principal: A-F via UNEB cross-matching of paper grades.
+    // - Subsidiary: D1–C6 on every paper = 1 point, otherwise 0.
+    // - Principal: A=6, B=5, C=4, D=3, E=2, O=1, F=0.
     let grade = '—';
     let points = 0;
     let comment = 'No data';
 
     if (config?.type === 'subsidiary') {
-      const result = calculateSubsidiaryGradeFromScores(numericPaperScores);
+      const result = calculateSubsidiaryGrade(paperGrades);
       grade = result.grade;
       points = result.points;
       comment = result.comment;
@@ -323,7 +321,7 @@ export default function ALevelReportCardPDF() {
 
       {/* Grading Scale */}
       <div className="grading-scale">
-        <div className="scale-title">GRADING SCALE</div>
+        <div className="scale-title">PAPER GRADES</div>
         <div className="scale-grid">
           <div className="scale-item"><span className="scale-grade">D1</span><span className="scale-range">90 - 100</span></div>
           <div className="scale-item"><span className="scale-grade">D2</span><span className="scale-range">80 - 89</span></div>
@@ -335,7 +333,18 @@ export default function ALevelReportCardPDF() {
           <div className="scale-item"><span className="scale-grade">P8</span><span className="scale-range">40 - 44</span></div>
           <div className="scale-item"><span className="scale-grade">F9</span><span className="scale-range">0 - 39</span></div>
         </div>
-        <div className="scale-note">* Principal subjects use D1-F9 scale. Subsidiary subjects use D1-F9 scale.</div>
+        <div className="scale-title scale-title-secondary">PRINCIPAL SUBJECT POINTS</div>
+        <div className="scale-grid scale-grid-principal">
+          <div className="scale-item"><span className="scale-grade">A</span><span className="scale-range">6</span></div>
+          <div className="scale-item"><span className="scale-grade">B</span><span className="scale-range">5</span></div>
+          <div className="scale-item"><span className="scale-grade">C</span><span className="scale-range">4</span></div>
+          <div className="scale-item"><span className="scale-grade">D</span><span className="scale-range">3</span></div>
+          <div className="scale-item"><span className="scale-grade">E</span><span className="scale-range">2</span></div>
+          <div className="scale-item"><span className="scale-grade">O</span><span className="scale-range">1</span></div>
+          <div className="scale-item"><span className="scale-grade">F</span><span className="scale-range">0</span></div>
+        </div>
+        <div className="scale-title scale-title-secondary">SUBSIDIARY SUBJECT POINTS</div>
+        <div className="scale-note">D1 – C6 = 1 point. P7, P8 and F9 = 0 points.</div>
       </div>
 
       {/* Comments Section */}
@@ -546,10 +555,16 @@ export default function ALevelReportCardPDF() {
           margin-bottom: 6px;
           text-decoration: underline;
         }
+        .scale-title-secondary {
+          margin-top: 8px;
+        }
         .scale-grid {
           display: grid;
           grid-template-columns: repeat(9, 1fr);
           gap: 2px;
+        }
+        .scale-grid-principal {
+          grid-template-columns: repeat(7, 1fr);
         }
         .scale-item {
           display: flex;

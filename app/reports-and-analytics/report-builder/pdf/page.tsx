@@ -3,6 +3,7 @@
 import React, { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useSchoolData } from "../../../context/SchoolDataContext";
+import { isSubjectOptional, studentTakesSubject } from "../../../utils/studentSubjects";
 
 function ReportCardPDFContent() {
   const [isHydrated, setIsHydrated] = useState(false);
@@ -88,15 +89,16 @@ function ReportCardPDFContent() {
     return (stream?.subjects ?? [])
       .filter((subEntry: any) => {
         const subjectName = typeof subEntry === "string" ? subEntry : subEntry.name;
-        // Check if subject is optional from catalog
-        const isOptional = catalog?.[subjectName] === "optional";
-        
-        // If optional, only include if student has this subject
-        if (isOptional) {
-          return student?.optionalSubjects.includes(subjectName);
+        // Optional vs compulsory follows the Subjects catalog (stream subject entry first).
+        const options = {
+          level: cls?.level ?? "O",
+          catalog,
+          subjectEntry: subEntry,
+        };
+        if (!student) {
+          return !isSubjectOptional(subjectName, options);
         }
-        // If compulsory, always include
-        return true;
+        return studentTakesSubject(student, subjectName, options);
       })
       .map((subEntry) => {
         const subjectName = typeof subEntry === "string" ? subEntry : subEntry.name;
@@ -164,7 +166,7 @@ function ReportCardPDFContent() {
         initials,
       };
     });
-  }, [stream, student, c1Assessment, c2Assessment, endOfCycleAssessment, catalog]);
+  }, [stream, cls, student, c1Assessment, c2Assessment, endOfCycleAssessment, catalog]);
 
   // Calculate overall grade and comments
   const overallGrades = reportRows

@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useSchoolData } from "../../context/SchoolDataContext";
 import { ALEVEL_SUBJECTS_CONFIG } from "../../context/alevelConfig";
 import AcademicYearSelector from "../../components/AcademicYearSelector";
-import { calculateFinalPaperScore, calculatePaperGrade, calculateUACESubjectGrade, calculateSubsidiaryGradeFromScores } from '../../utils/alevelGrades';
+import { calculateFinalPaperScore, calculatePaperGrade, calculateUACESubjectGrade, calculateSubsidiaryGrade } from '../../utils/alevelGrades';
 
 export default function ALevelReportBuilder() {
   const { classes, teachers, catalog, currentAcademicYearId, currentTermId } = useSchoolData();
@@ -60,7 +60,6 @@ export default function ALevelReportBuilder() {
     const paperGrades: string[] = [];
     const paperScores: Record<string, string> = {};
     const paperDetails: Record<string, { score: string; grade: string }> = {};
-    const numericPaperScores: number[] = [];
 
     if (config) {
       config.papers.forEach(paper => {
@@ -77,7 +76,6 @@ export default function ALevelReportBuilder() {
           if (paperGrade) {
             paperGrades.push(paperGrade);
           }
-          numericPaperScores.push(roundedScore);
         } else {
           paperScores[paper] = "—";
           paperDetails[paper] = { score: "—", grade: "—" };
@@ -86,14 +84,14 @@ export default function ALevelReportBuilder() {
     }
 
     // Subject grade:
-    // - Subsidiary: binary O/F from the average of all paper scores (>= 50% -> O).
-    // - Principal: A-F via UNEB cross-matching of paper grades.
+    // - Subsidiary: D1–C6 on every paper = 1 point, otherwise 0.
+    // - Principal: A=6, B=5, C=4, D=3, E=2, O=1, F=0.
     let grade = '—';
     let points = 0;
     let comment = 'No data';
 
     if (config?.type === 'subsidiary') {
-      const result = calculateSubsidiaryGradeFromScores(numericPaperScores);
+      const result = calculateSubsidiaryGrade(paperGrades);
       grade = result.grade;
       points = result.points;
       comment = result.comment;

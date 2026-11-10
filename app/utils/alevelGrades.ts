@@ -148,27 +148,25 @@ function gradeThreePaperSubject(values: number[]): string {
   return 'F';
 }
 
+/** Paper grades that earn the single subsidiary point (D1 through C6). */
+export const SUBSIDIARY_POINT_GRADES = ['D1', 'D2', 'C3', 'C4', 'C5', 'C6'];
+
 /**
- * Calculate Subsidiary Subject Grade from paper scores
- * Uses average of paper scores: >= 50% = O (Pass), < 50% = F (Fail)
+ * Subsidiary subject grade stays O or F.
+ * O (1 point) when every paper is D1–C6; F (0 points) otherwise.
  */
-export function calculateSubsidiaryGradeFromScores(paperScores: number[]): { grade: string; points: number; comment: string } {
-  // Filter out empty scores
-  const validScores = paperScores.filter((s: number) => typeof s === 'number' && !isNaN(s));
-  
-  if (validScores.length === 0) {
+export function calculateSubsidiaryGrade(paperGrades: string[]): { grade: string; points: number; comment: string } {
+  const validGrades = paperGrades.filter((grade) => grade && PAPER_GRADES.includes(grade));
+
+  if (validGrades.length === 0) {
     return { grade: '—', points: 0, comment: 'No data' };
   }
 
-  // Calculate average
-  const average = validScores.reduce((a: number, b: number) => a + b, 0) / validScores.length;
-  
-  // Binary grading: >= 50% = Pass (O), < 50% = Fail (F)
-  if (average >= 50) {
-    return { grade: 'O', points: 1, comment: 'Subsidiary Pass' };
-  } else {
-    return { grade: 'F', points: 0, comment: 'Fail' };
-  }
+  const passed = validGrades.every((grade) => SUBSIDIARY_POINT_GRADES.includes(grade));
+
+  return passed
+    ? { grade: 'O', points: 1, comment: 'Subsidiary Pass' }
+    : { grade: 'F', points: 0, comment: 'Fail' };
 }
 
 /**

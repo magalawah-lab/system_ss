@@ -318,6 +318,7 @@ export default function Navigation() {
             </div>
             <div className="sidebar-menu">
               <Link href="/reports-and-analytics" className={`menu-item ${pathname === '/reports-and-analytics' ? 'active' : ''}`}>Dashboard</Link>
+              <Link href="/reports-and-analytics/grade-summaries" className={`menu-item ${pathname === '/reports-and-analytics/grade-summaries' ? 'active' : ''}`}>Grade Summaries</Link>
               <Link href="/reports-and-analytics/report-builder" className={`menu-item ${pathname === '/reports-and-analytics/report-builder' ? 'active' : ''}`}>O-Level Report Cards</Link>
               <Link href="/reports-and-analytics/report-builder-alevel" className={`menu-item ${pathname === '/reports-and-analytics/report-builder-alevel' ? 'active' : ''}`}>A-Level Report Cards</Link>
               <Link href="#" className="menu-item">Export Center</Link>

@@ -5,6 +5,7 @@ import { Info } from "lucide-react";
 import Link from "next/link";
 import { useSchoolData } from "../../context/SchoolDataContext";
 import AcademicYearSelector from "../../components/AcademicYearSelector";
+import { studentTakesSubject } from "../../utils/studentSubjects";
 
 export default function ReportBuilder() {
   const { classes, teachers, catalog, academicYears, currentAcademicYearId, currentTermId } = useSchoolData();
@@ -89,15 +90,12 @@ export default function ReportBuilder() {
     return (currentStream?.subjects ?? [])
       .filter((subEntry: any) => {
         const subjectName = typeof subEntry === "string" ? subEntry : subEntry.name;
-        // Check if subject is optional from catalog
-        const isOptional = catalog?.[subjectName] === "optional";
-        
-        // If optional, only include if student has this subject
-        if (isOptional) {
-          return selectedStudent.optionalSubjects.includes(subjectName);
-        }
-        // If compulsory, always include
-        return true;
+        // Optional vs compulsory follows the Subjects catalog (stream subject entry first).
+        return studentTakesSubject(selectedStudent, subjectName, {
+          level: currentClass?.level ?? "O",
+          catalog,
+          subjectEntry: subEntry,
+        });
       })
       .map((subEntry: any) => {
         const subjectName = typeof subEntry === "string" ? subEntry : subEntry.name;
@@ -163,7 +161,7 @@ export default function ReportBuilder() {
         initials,
       };
     });
-  }, [selectedStudentId, selectedStudent, currentStream?.subjects, c1Assessment, c2Assessment, endOfCycleAssessment, catalog]);
+  }, [selectedStudentId, selectedStudent, currentClass, currentStream?.subjects, c1Assessment, c2Assessment, endOfCycleAssessment, catalog]);
 
   // Calculate overall performance
   const overallGrades = reportRows

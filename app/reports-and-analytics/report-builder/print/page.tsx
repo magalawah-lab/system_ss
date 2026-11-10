@@ -3,6 +3,7 @@
 import React, { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useSchoolData } from "../../../context/SchoolDataContext";
+import { studentTakesSubject } from "../../../utils/studentSubjects";
 
 function PrintAllReportCardsContent() {
   const [isHydrated, setIsHydrated] = useState(false);
@@ -83,9 +84,11 @@ function PrintAllReportCardsContent() {
   const getStudentSubjects = (student: any) => {
     return (stream?.subjects ?? []).filter((subEntry: any) => {
       const subjectName = typeof subEntry === "string" ? subEntry : subEntry.name;
-      const isCompulsory = catalog[subjectName] !== "optional";
-      const isStudentOptional = student.optionalSubjects?.includes(subjectName);
-      return isCompulsory || isStudentOptional;
+      return studentTakesSubject(student, subjectName, {
+        level: cls?.level ?? "O",
+        catalog,
+        subjectEntry: subEntry,
+      });
     });
   };
 

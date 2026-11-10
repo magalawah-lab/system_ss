@@ -8,6 +8,7 @@ import ProtectedRoute from "../components/ProtectedRoute";
 import { useIsClassTeacher, useSchoolData } from "../context/SchoolDataContext";
 import { useAuth } from "../context/SupabaseAuthContext";
 import { ALEVEL_SUBSIDIARY_COMPULSORY, ALEVEL_SUBSIDIARY_CHOICES, ALEVEL_SUBSIDIARY_SUBJECTS } from "../context/alevelConfig";
+import { isSubjectOptional } from "../utils/studentSubjects";
 
 export default function StudentManagement() {
   return (
@@ -66,10 +67,9 @@ function StudentManagementContent() {
   const currentStream = currentClass?.streams.find((s) => s.name === selectedStream);
 
   const catalogSubjects = Object.keys(catalog).filter(key => !key.startsWith('O:') && !key.startsWith('A:')).sort();
-  const availableOptionalSubjects = (currentStream?.subjects || []).map((sub: any) => sub.name).filter((s) => {
-    const levelKey = `${level}:${s}`;
-    return catalog[levelKey] === 'optional' || (!catalog[levelKey] && catalog[s] === 'optional');
-  });
+  const availableOptionalSubjects = (currentStream?.subjects || [])
+    .filter((sub: any) => isSubjectOptional(typeof sub === 'string' ? sub : sub.name, { level, catalog, subjectEntry: sub }))
+    .map((sub: any) => (typeof sub === 'string' ? sub : sub.name));
 
   // A-Level: the class offers many subjects, but each student picks exactly 5
   // (3 principal + General Paper + one subsidiary choice).

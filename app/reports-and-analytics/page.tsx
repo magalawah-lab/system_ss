@@ -2,6 +2,7 @@
 import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSchoolData, SubjectEntry, Student } from "../context/SchoolDataContext";
+import { isSubjectOptional, studentTakesSubject } from "../utils/studentSubjects";
 
 export default function ReportsAndAnalytics() {
   const { classes, teachers, catalog } = useSchoolData();
@@ -30,6 +31,17 @@ export default function ReportsAndAnalytics() {
 
   const studentForPrint = useMemo(() => students.find((s) => s.id === selectedStudentId) ?? null, [students, selectedStudentId]);
   const assessments = useMemo(() => currentClass?.assessments ?? [], [currentClass]);
+
+  // Subject enrolment uses the category set on the Subjects (catalog) page.
+  const takesSubject = useCallback(
+    (student: Student, subEntry: SubjectEntry): boolean =>
+      studentTakesSubject(student, subEntry.name, {
+        level: currentClass?.level ?? "O",
+        catalog,
+        subjectEntry: subEntry,
+      }),
+    [currentClass, catalog]
+  );
 
   // Grading scale based on 100% mark
   function getGrade(mark: number | null): string {
@@ -76,12 +88,15 @@ export default function ReportsAndAnalytics() {
   const reportRows = useMemo(() => {
     return (currentStream?.subjects ?? [])
       .filter((subEntry: SubjectEntry) => {
-        const subjectName = subEntry.name;
-        const isOptional = catalog?.[subjectName] === "optional";
-        if (isOptional) {
-          return studentForPrint?.optionalSubjects.includes(subjectName);
+        const options = {
+          level: currentClass?.level ?? "O",
+          catalog,
+          subjectEntry: subEntry,
+        };
+        if (!studentForPrint) {
+          return !isSubjectOptional(subEntry.name, options);
         }
-        return true;
+        return studentTakesSubject(studentForPrint, subEntry.name, options);
       })
       .map((subEntry: SubjectEntry) => {
         const subjectName = subEntry.name;
@@ -126,7 +141,7 @@ export default function ReportsAndAnalytics() {
           initials,
         };
       });
-  }, [currentStream, studentForPrint, c1Assessment, c2Assessment, endOfCycleAssessment, catalog, getTeacherInitials]);
+  }, [currentStream, currentClass, studentForPrint, c1Assessment, c2Assessment, endOfCycleAssessment, catalog, getTeacherInitials]);
 
   // Calculate overall grade for preview
   const overallGrades = reportRows.map((r) => r.hundred).filter((h) => h !== "") as string[];
@@ -396,14 +411,13 @@ export default function ReportsAndAnalytics() {
       <div className="print-all-container">
         {printableStudents.map((st: Student, studentIdx: number) => {
           const studentReportRows = (currentStream?.subjects ?? [])
-            .filter((subEntry: SubjectEntry) => {
-              const subjectName = subEntry.name;
-              const isOptional = catalog?.[subjectName] === "optional";
-              if (isOptional) {
-                return st.optionalSubjects.includes(subjectName);
-              }
-              return true;
-            })
+            .filter((subEntry: SubjectEntry) =>
+              studentTakesSubject(st, subEntry.name, {
+                level: currentClass?.level ?? "O",
+                catalog,
+                subjectEntry: subEntry,
+              })
+            )
             .map((subEntry: SubjectEntry) => {
               const subjectName = subEntry.name;
               const teacherId = typeof subEntry === "string" ? undefined : subEntry.teacherId;
