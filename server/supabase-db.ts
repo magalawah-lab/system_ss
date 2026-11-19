@@ -297,6 +297,73 @@ async function readColumn<T>(column: string, fallback: T): Promise<T> {
   return (value === null || value === undefined) ? fallback : value as T;
 }
 
+// Fingerprint of the blob data the relational structure is built from.
+//
+// Mark entry writes only assessment.scores / subjectScores / paperScores (see
+// updateAssessmentScore and the two functions after it), so those three keys are
+// dropped before hashing. Without that, every mark keystroke batch would look
+// like a structural change and the sync below would re-materialise the entire
+// structure - the opposite of the point.
+//
+// Object keys are sorted recursively because the same data arrives differently
+// depending on where it came from: jsonb hands back its own key order, while the
+// payload from the browser carries React's. Sorting makes one fingerprint out of
+// both, so a save that changes nothing does not trigger a sync.
+function structuralFingerprint(classes: unknown, academicYears: unknown): string {
+  const canonical = (value: any): any => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === 'object') {
+      return Object.keys(value).sort().reduce<Record<string, any>>((sorted, key) => {
+        sorted[key] = canonical(value[key]);
+        return sorted;
+      }, {});
+    }
+    return value;
+  };
+
+  const structuralClasses = (Array.isArray(classes) ? classes : []).map((classItem: any) => {
+    const { assessments, ...rest } = classItem || {};
+    return {
+      ...rest,
+      assessments: (Array.isArray(assessments) ? assessments : []).map((assessment: any) => {
+        if (!assessment || typeof assessment !== 'object') return assessment;
+        // Deleting rather than destructuring the three keys out: the point is
+        // "these three hold marks", and it keeps the copy explicit.
+        const structure = { ...assessment };
+        delete structure.scores;
+        delete structure.subjectScores;
+        delete structure.paperScores;
+        return structure;
+      }),
+    };
+  });
+
+  return createHash('sha256')
+    .update(JSON.stringify(canonical({ classes: structuralClasses, academic_years: academicYears ?? [] })))
+    .digest('hex');
+}
+
+// Ask the database to re-materialise the relational structure, but only when the
+// structure actually changed. public.sync_relational_structure compares the
+// fingerprint against the one stored by the last sync and returns without
+// touching the blob when they match - the normal case for a mark save.
+//
+// Failures are logged and swallowed deliberately. In Release 1 the blob is still
+// the source of truth and nothing reads the relational tables yet, so a sync that
+// fails must not turn a save that succeeded into an error the teacher sees. The
+// fingerprint is only stored when the seed itself succeeds, so the next save
+// retries a sync that failed rather than skipping it.
+async function syncRelationalStructure(state: State): Promise<void> {
+  try {
+    const fingerprint = structuralFingerprint(state.classes, state.academic_years);
+    const { error } = await getSupabaseAdmin()
+      .rpc('sync_relational_structure', { p_fingerprint: fingerprint });
+    if (error) throw new Error(error.message);
+  } catch (error) {
+    console.error('Relational structure sync failed (the save itself succeeded):', error);
+  }
+}
+
 async function writeState(state: State): Promise<State> {
   const nextRevision = state.revision + 1;
   const payload = {
@@ -324,13 +391,21 @@ async function writeState(state: State): Promise<State> {
         .insert(payload)
         .select('id, revision')
         .single();
-      if (!insertError) return payload;
+      if (!insertError) {
+        await syncRelationalStructure(payload);
+        return payload;
+      }
     }
     const message = error.code === 'PGRST116'
       ? 'The data changed in another session. Reload the page before saving again.'
       : error.message;
     throw new Error(`Supabase school_state write failed: ${message}`);
   }
+  // Release 1: keep the relational tables in step with the blob. This is the one
+  // place every writer funnels through, so no individual caller has to remember
+  // to sync. It runs after the write has committed and it decides for itself
+  // whether anything structural changed.
+  await syncRelationalStructure(payload);
   return payload;
 }
 
