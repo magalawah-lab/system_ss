@@ -16,9 +16,10 @@ export async function POST(request: Request) {
   try {
     const classesData = await request.json() as ClassItem[];
     await upsertClasses(classesData);
-    // Return fresh data
-    const updatedClasses = await serializeClasses();
-    return NextResponse.json(updatedClasses, { status: 200 });
+    // Do not re-read the full state here. The caller already holds the exact
+    // payload it just sent, and an extra read of the whole blob doubles the
+    // disk IO of every save.
+    return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
     console.error('Failed to upsert classes:', error);
     const message = error instanceof Error ? error.message : String(error);

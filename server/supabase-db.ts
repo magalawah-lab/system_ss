@@ -281,6 +281,22 @@ async function readState(): Promise<State> {
   };
 }
 
+// Read a single column of the state row. readState() selects '*' — the entire
+// ~900 KB row — but teachers, catalog and academic_years are a few KB each.
+// PostgreSQL does not have to detoast the out-of-line classes column to return
+// them, so callers that need only a small slice should not pay for the blob.
+async function readColumn<T>(column: string, fallback: T): Promise<T> {
+  const { data, error } = await getSupabaseAdmin()
+    .from('school_state')
+    .select(column)
+    .eq('id', 'default')
+    .maybeSingle();
+
+  if (error) throw new Error(`Supabase school_state read failed: ${error.message}`);
+  const value = (data as Record<string, unknown> | null)?.[column];
+  return (value === null || value === undefined) ? fallback : value as T;
+}
+
 async function writeState(state: State): Promise<State> {
   const nextRevision = state.revision + 1;
   const payload = {
@@ -289,34 +305,38 @@ async function writeState(state: State): Promise<State> {
     revision: nextRevision,
     updated_at: new Date().toISOString(),
   };
-  const { data, error } = await getSupabaseAdmin()
+  // Request only the columns the revision guard needs. Selecting '*' makes
+  // PostgREST send the whole row back, and the row is a ~900 KB TOASTed JSONB
+  // blob we already hold in memory, so every save downloaded a second full copy
+  // of itself. No caller uses the returned state.
+  const { error } = await getSupabaseAdmin()
     .from('school_state')
     .update(payload)
     .eq('id', 'default')
     .eq('revision', state.revision)
-    .select('*')
+    .select('id, revision')
     .single();
 
   if (error) {
     if (error.code === 'PGRST116' && state.revision === 0) {
-      const { data: inserted, error: insertError } = await getSupabaseAdmin()
+      const { error: insertError } = await getSupabaseAdmin()
         .from('school_state')
         .insert(payload)
-        .select('*')
+        .select('id, revision')
         .single();
-      if (!insertError) return inserted as State;
+      if (!insertError) return payload;
     }
     const message = error.code === 'PGRST116'
       ? 'The data changed in another session. Reload the page before saving again.'
       : error.message;
     throw new Error(`Supabase school_state write failed: ${message}`);
   }
-  return data as State;
+  return payload;
 }
 
 export async function seedDefaults(): Promise<void> {
-  const [classes, teachers, catalog] = await Promise.all([serializeClasses(), getTeachers(), getCatalog()]);
-  if (classes.length || teachers.length || Object.keys(catalog).length) return;
+  const state = await readState();
+  if (state.classes.length || state.teachers.length || Object.keys(state.catalog).length) return;
   await replaceTeachers([
     { id: 't1', name: 'John Doe', initials: 'JD' },
     { id: 't2', name: 'Jane Smith', initials: 'JS' },
@@ -346,7 +366,7 @@ export async function upsertClasses(classes: any[], force = false): Promise<void
 }
 
 export async function getTeachers(): Promise<any[]> {
-  return (await readState()).teachers;
+  return readColumn<any[]>('teachers', []);
 }
 
 export async function replaceTeachers(teachers: any[]): Promise<void> {
@@ -355,7 +375,7 @@ export async function replaceTeachers(teachers: any[]): Promise<void> {
 }
 
 export async function getCatalog(): Promise<Record<string, SubjectCategory>> {
-  return (await readState()).catalog;
+  return readColumn<Record<string, SubjectCategory>>('catalog', {});
 }
 
 export async function replaceCatalog(catalog: Record<string, SubjectCategory>): Promise<void> {
@@ -364,7 +384,7 @@ export async function replaceCatalog(catalog: Record<string, SubjectCategory>): 
 }
 
 export async function getAcademicYears(): Promise<any[]> {
-  return (await readState()).academic_years;
+  return readColumn<any[]>('academic_years', []);
 }
 
 export async function saveAcademicYears(years: any[]): Promise<void> {
@@ -477,15 +497,17 @@ export async function updateTeacherAssignment(className: string, streamName: str
 }
 
 export async function exportBackup(): Promise<any> {
+  // One read instead of four separate full-blob reads.
+  const state = await readState();
   return {
     version: 2,
     exportedAt: new Date().toISOString(),
     backend: 'supabase-relational',
     data: {
-      teachers: await getTeachers(),
-      classes: await serializeClasses(),
-      catalog: await getCatalog(),
-      academicYears: await getAcademicYears(),
+      teachers: state.teachers,
+      classes: state.classes,
+      catalog: state.catalog,
+      academicYears: state.academic_years,
     },
   };
 }
@@ -506,16 +528,20 @@ export async function getStudents(streamId?: string): Promise<any[]> {
 }
 
 export async function getStorageDiagnostics() {
-  const [classes, teachers, catalog, academicYears] = await Promise.all([
-    serializeClasses(), getTeachers(), getCatalog(), getAcademicYears(),
-  ]);
+  // One read, not four. The previous Promise.all() issued four identical
+  // full-blob reads of the same single row.
+  const state = await readState();
+  const classes = state.classes;
+  const teachers = state.teachers;
+  const catalog = state.catalog;
+  const academicYears = state.academic_years;
   const streams = classes.flatMap((item: any) => item.streams || []);
   const assessments = classes.flatMap((item: any) => item.assessments || []);
   const students = streams.flatMap((stream: any) => stream.students || []);
   const terms = academicYears.flatMap((year: any) => year.terms || []);
 
   return {
-    sourceOfTruth: 'public relational tables',
+    sourceOfTruth: 'public.school_state (single JSONB row)',
     counts: {
       teachers: teachers.length,
       classes: classes.length,

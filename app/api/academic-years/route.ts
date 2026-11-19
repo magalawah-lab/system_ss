@@ -16,7 +16,10 @@ export async function POST(request: Request) {
     const body = await request.json();
     const years = Array.isArray(body) ? body : [];
     await saveAcademicYears(years);
-    return NextResponse.json(await getAcademicYears(), { status: 200 });
+    // Return the payload we just persisted. Calling getAcademicYears() here
+    // issued a third full read of the ~900 KB school_state row to fetch back
+    // data the caller already holds.
+    return NextResponse.json(years, { status: 200 });
   } catch (error) {
     console.error('Failed to save academic years:', error);
     const message = error instanceof Error ? error.message : String(error);

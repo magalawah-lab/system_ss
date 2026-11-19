@@ -396,7 +396,10 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     fetcher,
     {
       fallbackData: undefined,
-      refreshInterval: 60000,
+      // Every poll is a full read and download of the whole school blob, so
+      // each open tab costs real disk IO. Local edits are authoritative and
+      // saves are queue-serialized, so a 5 minute floor is plenty.
+      refreshInterval: 300000,
       revalidateOnFocus: false,
       dedupingInterval: 10000
     }
@@ -638,10 +641,26 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
   const lastUpdate = useRef<Record<string, number>>({ classes: 0, teachers: 0, catalog: 0 });
   const lastSynced = useRef<Record<string, any>>({ classes: null, teachers: null, catalog: null });
   const pendingSyncs = useRef<Set<string>>(new Set());
+  // Consecutive failed auto-saves. Drives the retry backoff in the auto-save
+  // effect so a project that is refusing writes is not rewritten every 3s.
+  const saveFailures = useRef(0);
 
   // Warn user if leaving while saving or with unsaved changes, plus best-effort beacon save
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      // Flush the crash-recovery buffers synchronously. The sendBeacon calls
+      // below cannot carry the classes payload: browsers cap beacon bodies at
+      // roughly 64 KB and the classes array is ~900 KB, so those marks were
+      // dropped without any error. localStorage is the only channel that
+      // reliably survives the unload.
+      if (hasUnsavedChanges) {
+        try {
+          if (dirty.classes) localStorage.setItem('school:classes_buffer', JSON.stringify(classes));
+          if (dirty.teachers) localStorage.setItem('school:teachers_buffer', JSON.stringify(teachers));
+          if (dirty.catalog) localStorage.setItem('school:catalog_buffer', JSON.stringify(catalog));
+        } catch { /* storage full or unavailable */ }
+      }
+
       // Best-effort synchronous flush to the server using sendBeacon
       if (hasUnsavedChanges && typeof navigator !== 'undefined' && 'sendBeacon' in navigator) {
         try {
@@ -747,7 +766,10 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
       lastSynced.current[category] = data;
       lastUpdate.current[category] = Date.now();
       localStorage.removeItem(`school:${category}_buffer`);
-      await mutate(mutateKey, data, { revalidate: true });
+      // Seed the SWR cache with the payload we just persisted instead of
+      // revalidating. A revalidate issues another full-blob read and download
+      // of data we already have, doubling the cost of every save.
+      await mutate(mutateKey, data, { revalidate: false });
       setSyncError(null);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -772,12 +794,8 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
 
   const setClasses = useCallback((updater: React.SetStateAction<ClassItem[]>) => {
     setDirty(d => ({ ...d, classes: true }));
-    setClassesState((prev) => {
-      const next = typeof updater === 'function' ? (updater as any)(prev) : updater;
-      localStorage.setItem("school:classes_buffer", JSON.stringify(next));
-      lastUpdate.current.classes = Date.now();
-      return next;
-    });
+    lastUpdate.current.classes = Date.now();
+    setClassesState(updater);
   }, []);
 
   const setTeachers = useCallback((updater: React.SetStateAction<Teacher[]>) => {
@@ -822,7 +840,11 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     setSyncError(null);
     try {
       if (dirty.classes) {
-        await syncToServer('/classes', classes, `${API_URL}/classes`, 'classes');
+        // Route through the same queue as persistClassesImmediately so two
+        // concurrent read-modify-write cycles can never interleave. Interleaved
+        // writes are rejected by the revision guard and surface as
+        // "The data changed in another session" errors.
+        await persistClassesImmediately(classes);
       }
       if (dirty.teachers) {
         await syncToServer('/teachers', teachers, `${API_URL}/teachers`, 'teachers');
@@ -832,38 +854,55 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
       }
       setDirty({ classes: false, teachers: false, catalog: false });
       setSyncError(null);
+      saveFailures.current = 0;
     } catch (e) {
       console.error('Failed to save changes:', e);
+      saveFailures.current += 1;
       setSyncError('Failed to save some changes. Please try again.');
     } finally {
       setIsSaving(false);
     }
-  }, [classes, teachers, catalog, dirty]);
+  }, [classes, teachers, catalog, dirty, persistClassesImmediately]);
 
-  // Auto-save changes after a brief delay, plus a WATCHDOG that forces
-  // a save every 8s while dirty (so a user who keeps typing scores never
-  // ends up with >8s of unsaved data).
+  // Crash-recovery buffer for local edits. This used to run inside the setClasses
+  // state updater, which meant stringifying the whole ~900 KB classes array and
+  // writing it to localStorage synchronously on every keystroke. During mark
+  // entry that blocked the main thread on each keypress. Throttling it keeps the
+  // same recovery guarantee (the unload handler flushes synchronously) without
+  // paying the cost per keystroke.
+  useEffect(() => {
+    if (!dirty.classes) return;
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem('school:classes_buffer', JSON.stringify(classes));
+      } catch { /* storage full or unavailable */ }
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [classes, dirty.classes]);
+
+  // Auto-save changes after a brief delay.
+  //
+  // Every save rewrites the whole ~900 KB classes blob, so the retry interval
+  // matters as much as the save itself. A failed save leaves `dirty` set, and
+  // clearing and re-arming `isSaving` re-runs this effect, which used to retry
+  // 3s later (and again on a separate 8s watchdog). While the project is
+  // IO-throttled that is an endless loop of megabyte writes that starves the
+  // reads the login page needs. Back off geometrically instead, and stop at a
+  // ceiling so a wedged project is retried steadily rather than hammered.
   useEffect(() => {
     if (!hasUnsavedChanges || isSaving) return;
+
+    const failures = saveFailures.current;
+    const retryDelay = failures === 0 ? 3000 : Math.min(3000 * 2 ** failures, 60000);
 
     const debounceTimer = setTimeout(() => {
       if (dirty.classes || dirty.teachers || dirty.catalog) {
         console.log('Auto-saving changes (debounce)...');
         saveChanges().catch(e => console.error('Auto-save failed:', e));
       }
-    }, 3000);
+    }, retryDelay);
 
-    const watchdogTimer = setInterval(() => {
-      if ((dirty.classes || dirty.teachers || dirty.catalog) && !isSaving) {
-        console.log('Auto-saving changes (watchdog)...');
-        saveChanges().catch(e => console.error('Watchdog save failed:', e));
-      }
-    }, 8000);
-
-    return () => {
-      clearTimeout(debounceTimer);
-      clearInterval(watchdogTimer);
-    };
+    return () => clearTimeout(debounceTimer);
   }, [hasUnsavedChanges, isSaving, saveChanges, dirty]);
 
   // One-time migration: rename legacy A-Level subject names to the canonical
@@ -1448,19 +1487,12 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         )),
       };
     }));
-    // Immediate granular DB write for "very persistent" scores
-    (async () => {
-      try {
-        await fetch(`${API_URL}/assessments/scores`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'general', assessmentId, studentId, score }),
-        });
-      } catch (e) {
-        console.warn('Granular score sync failed, will retry on bulk save:', e);
-      }
-    })();
-  }, [setClasses, API_URL]);
+    // No per-keystroke write here. /api/assessments/scores rewrites the same
+    // school_state row as the bulk classes save, so firing it on every
+    // keystroke duplicates the entire blob write and races the bulk save.
+    // Durability is provided by the debounced save, the 8s watchdog, and the
+    // sendBeacon flush on unload.
+  }, [setClasses]);
 
   const setSubjectScoreForAssessment = useCallback((classIndex: number, assessmentId: string, subjectName: string, studentId: string, score: number | null) => {
     setClasses((prev) => prev.map((cls, index) => {
@@ -1483,19 +1515,8 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         )),
       };
     }));
-    // Immediate granular DB write for "very persistent" scores
-    (async () => {
-      try {
-        await fetch(`${API_URL}/assessments/scores`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'subject', assessmentId, subjectName, studentId, score }),
-        });
-      } catch (e) {
-        console.warn('Granular subject-score sync failed, will retry on bulk save:', e);
-      }
-    })();
-  }, [setClasses, API_URL]);
+    // See setScoreForAssessment: the bulk classes save already persists this.
+  }, [setClasses]);
 
   const setPaperScoreForAssessment = useCallback((classIndex: number, assessmentId: string, subjectName: string, paperName: string, studentId: string, score: number | null) => {
     setClasses((prev) => prev.map((cls, index) => {
@@ -1521,19 +1542,8 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         )),
       };
     }));
-    // Immediate granular DB write for "very persistent" scores
-    (async () => {
-      try {
-        await fetch(`${API_URL}/assessments/scores`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'paper', assessmentId, subjectName, paperName, studentId, score }),
-        });
-      } catch (e) {
-        console.warn('Granular paper-score sync failed, will retry on bulk save:', e);
-      }
-    })();
-  }, [setClasses, API_URL]);
+    // See setScoreForAssessment: the bulk classes save already persists this.
+  }, [setClasses]);
 
   const updateAssessmentInClass = useCallback((classIndex: number, assessmentId: string, updates: Partial<Assessment>) => {
     const nextClasses = classes.map((cls, index) => {
