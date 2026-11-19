@@ -14,15 +14,24 @@
 --   rows this script created.
 --
 -- SAFETY
---   * Additive only. It never deletes from and never rewrites public.school_state,
---     so the blob stays the source of truth and the rollback is "do nothing".
+--   * It never deletes from and never rewrites public.school_state, so the blob
+--     stays the source of truth and the rollback is "do nothing".
 --   * Idempotent. Every write is an UPSERT on the primary key `id`, so re-running
 --     is a no-op instead of a duplicate-key error.
+--   * One exception to "additive", added by decision: a student or assessment
+--     deleted in the app is hard deleted here along with its marks, because the
+--     blob is the source of truth for deletions too. Only the two tables that
+--     carry blob_id are touched, which is the only mapping that can tell an
+--     app deletion apart from a row that predates the seed. This is the one
+--     irreversible statement in the file - read the `deletes` block before
+--     running, and take a fresh /api/backup first. Everything is reported.
 --   * Fails loudly (and the whole transaction rolls back) when the data cannot be
 --     mapped safely: duplicate derived student UUIDs, duplicate derived ids among
 --     academic years/terms/classes/streams/assessments, admission-number
 --     collisions, or student admission numbers already owned by a different id.
---     It never picks a winner between two rows that would merge into one.
+--     It never picks a winner between two rows that would merge into one. Nor
+--     does it delete anything when the blob has lost a whole table, since that
+--     is a blob fault rather than a deletion.
 --   * No checksum writes, no triggers, no functions left in the write path. The
 --     earlier `school_state_relational_sync` trigger is NOT recreated.
 --
@@ -48,11 +57,14 @@
 --      p_include_scores = false, i.e. structure only, no public.scores write. It
 --      runs over PostgREST RPC with the service-role key after a save whose
 --      structure actually changed, so a class or student created in the app also
---      exists as relational rows for Release 2's mark writes to attach to. The
+--      exists as relational rows for Release 2's mark writes to attach to, and a
+--      student deleted in the app loses its row and its marks here as well. The
 --      relational tables are otherwise a frozen seed-time snapshot and their only
 --      other writer (insertRelationalClasses) is dead code.
 --      This path never writes marks and the read path still reads the blob, so
---      Release 1 on its own changes no user-visible behaviour.
+--      Release 1 on its own changes no user-visible behaviour - except that a
+--      deletion now also removes that student's seeded marks immediately. No
+--      reader sees them either way, and after Release 2 both would.
 --      The fingerprint is computed in TypeScript, so the first save after this
 --      file is run does one structural sync (the fingerprint row is still empty)
 --      and thereafter only structural saves do.
@@ -63,6 +75,9 @@
 --      order to keep the blob's fractional marks (13,343 of 31,553) intact.
 --      Without it this seed would silently round every fractional mark again.
 --   1. Snapshot first:   GET <app-url>/api/backup   (downloads school-backup-*.json)
+--      Now load-bearing, not just good practice: the seed hard deletes students
+--      and assessments the blob no longer has, and the tables hold the only
+--      surviving copy of the marks of a student the blob has lost.
 --   2. Run this whole file in the Supabase SQL editor. The last statement returns
 --      one JSON report - read `adjusted_admission_numbers` and the count deltas.
 --      Run the WHOLE file, not just STEP 5: STEP 0b is what adds the blob_id
@@ -382,7 +397,8 @@ drop function if exists public.seed_relational_from_state(boolean);
 
 
 -- ---------------------------------------------------------------------------
--- The seed. Additive + idempotent + single transaction.
+-- The seed. Idempotent + single transaction. Structurally additive, but with one
+-- deliberate exception: it hard deletes a student/assessment the app deleted.
 --
 -- p_include_scores = true   the full Phase A seed, what STEP 5 runs.
 -- p_include_scores = false  structure only: everything except public.scores.
@@ -390,9 +406,8 @@ drop function if exists public.seed_relational_from_state(boolean);
 --   directly. It skips the 31,553 score upserts on purpose: for a structural save
 --   they are both the expensive half and the pointless one, and marks are still
 --   written to the blob until Release 2 ships the per-mark endpoint.
---   It is deliberately additive - it never deletes. A student deleted in the app
---   therefore leaves its row behind; stale_blob_id_rows reports that rather than
---   the seed silently repairing it.
+--   The deletes are NOT skipped on this path - a deletion is structural, and its
+--   marks go with it, which is why the same call also removes those score rows.
 --
 -- The structure half is not duplicated anywhere. Putting the sync behind this
 -- same function is what keeps one implementation of the id derivation: a second
@@ -413,6 +428,9 @@ declare
   v_scores bigint;
   v_scores_skipped bigint;
   v_fractional bigint;
+  v_deleted_scores bigint;
+  v_deleted_students bigint;
+  v_deleted_assessments bigint;
 begin
   select jsonb_build_object(
            'classes', public.blob_array(classes),
@@ -876,6 +894,63 @@ begin
         max_score = excluded.max_score, academic_year_id = excluded.academic_year_id,
         term_id = excluded.term_id, blob_id = excluded.blob_id;
 
+  -- ================================================================= deletes
+  -- Hard delete. The blob is the source of truth, deletions included: a student
+  -- or assessment removed in the app is removed here too, with its marks.
+  --
+  -- Scope is exactly the two tables that carry blob_id. That column is the only
+  -- thing that can tell "the app deleted this" from "this row was here before
+  -- the seed", and every row in both tables has one (verified by the last run:
+  -- students_without_blob_id 0, assessments_without_blob_id 0). classes,
+  -- streams, terms and stream_subjects have no blob_id, so nothing here deletes
+  -- them - a stream removed in the app keeps its row and its stream_subjects
+  -- rows until the students in it leave the blob too. No table on the mark read
+  -- path depends on those rows.
+  --
+  -- There are NO foreign keys between these tables (every *_id is a bare uuid),
+  -- so deleting a student does NOT cascade to scores. The marks have to be
+  -- deleted first or they survive as orphans - which is precisely what the
+  -- `orphan_scores` invariant in STEP 4 counts, and it is why that check exists.
+  --
+  -- A row whose blob_id is null can never match a blob row, so it is left alone
+  -- rather than read as deleted. Nothing currently has a null blob_id.
+  --
+  -- This is the one irreversible statement in this file. /api/backup is the
+  -- recovery path; take a fresh one before running.
+  --
+  -- Two aborts, because this is the only thing here that can destroy data the
+  -- blob no longer has a copy of. Both mean "the blob lost a whole table", which
+  -- is never a legitimate deletion:
+  if exists (select 1 from public.students) and not exists (select 1 from t_student) then
+    raise exception 'Aborting: the blob has no students but public.students has rows. Every student and every mark would be deleted. That is a blob problem, not a deletion to apply. Restore the blob from /api/backup first.';
+  end if;
+  if exists (select 1 from public.assessments) and not exists (select 1 from t_assessment) then
+    raise exception 'Aborting: the blob has no assessments but public.assessments has rows. Every assessment and every mark would be deleted. That is a blob problem, not a deletion to apply. Restore the blob from /api/backup first.';
+  end if;
+
+  delete from public.scores sc
+  where sc.student_id in (
+          select s.id from public.students s
+          where s.blob_id is not null
+            and not exists (select 1 from t_student t where coalesce(t.blob_id, '') = s.blob_id)
+        )
+     or sc.assessment_id in (
+          select a.id from public.assessments a
+          where a.blob_id is not null
+            and not exists (select 1 from t_assessment t where coalesce(t.blob_id, '') = a.blob_id)
+        );
+  get diagnostics v_deleted_scores = row_count;
+
+  delete from public.students s
+  where s.blob_id is not null
+    and not exists (select 1 from t_student t where coalesce(t.blob_id, '') = s.blob_id);
+  get diagnostics v_deleted_students = row_count;
+
+  delete from public.assessments a
+  where a.blob_id is not null
+    and not exists (select 1 from t_assessment t where coalesce(t.blob_id, '') = a.blob_id);
+  get diagnostics v_deleted_assessments = row_count;
+
   -- The mark is stored exactly as the blob has it. It used to be
   -- round(...)::integer here because public.scores.score was `integer`;
   -- migrations/004 retyped it to numeric, so the fractional marks in the blob
@@ -929,6 +1004,19 @@ begin
       'students', (select count(*) from public.students),
       'assessments', (select count(*) from public.assessments),
       'scores', (select count(*) from public.scores)
+    ),
+    -- Rows the hard delete removed, from GET DIAGNOSTICS on each delete itself
+    -- (not recomputed from the counts, so this reports what actually happened).
+    -- All three are 0 on a run where nothing was deleted in the app. `scores`
+    -- counts marks belonging to a deleted student OR a deleted assessment.
+    --
+    -- Non-zero here means table_counts_before no longer equals
+    -- table_counts_after, and that is correct, not drift: the app deleted
+    -- something. Re-running produces 0 and equal counts again.
+    'hard_delete', jsonb_build_object(
+      'students', v_deleted_students,
+      'assessments', v_deleted_assessments,
+      'scores', v_deleted_scores
     ),
     'adjusted_admission_numbers', (
       select coalesce(jsonb_agg(jsonb_build_object(
@@ -1198,8 +1286,8 @@ select
         where ss.id = 'default' and stu->>'id' = s.blob_id
       )) as stale_blob_id_rows,
   -- Same drift, for assessments. Only students and assessments carry a blob_id,
-  -- so classes / streams / terms deletions are not measurable here at all - that
-  -- is a known gap of the report-only policy, not an oversight in this query.
+  -- so classes / streams / terms deletions are neither deleted by the seed nor
+  -- measurable here at all. Nothing on the mark read path reads those rows.
   (select count(*) from public.assessments a
     where a.blob_id is not null
       and not exists (
@@ -1308,12 +1396,16 @@ select jsonb_build_object(
          left join public.assessments a on a.id = s.assessment_id
          left join public.students st on st.id = s.student_id
         where a.id is null or st.id is null),
-      -- duplicate_blob_student_ids must be 0: a duplicate makes the lookup
-      -- ambiguous. Neither stale_blob_* count is a failure - both are the
-      -- deletion drift the agreed report-only policy leaves in place, so they are
-      -- expected to rise when someone deletes a student or an assessment in the
-      -- app. Neither is a count of students without a blob_id; those are reported
-      -- in blob_id_mapping.
+      -- duplicate_blob_student_ids must be 0: a duplicate makes the blob_id
+      -- lookup ambiguous, so the seed aborts on it and so does the delete.
+      --
+      -- Both stale_blob_* counts read the blob AFTER the seed has run, and the
+      -- seed now hard deletes exactly the rows they count. So they are not drift
+      -- any more - they are the check that the delete worked. Any non-zero value
+      -- means a student or assessment left the blob but its row stayed, which is
+      -- a bug in the delete, not a normal state to expect after a deletion.
+      -- Neither is a count of students without a blob_id; those are reported in
+      -- blob_id_mapping.
       'duplicate_blob_student_ids', (select count(*) from (select blob_id from public.students where blob_id is not null group by blob_id having count(*) > 1) d),
       'stale_blob_id_rows', (
         select count(*) from public.students s

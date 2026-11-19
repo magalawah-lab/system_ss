@@ -429,8 +429,94 @@ export async function seedDefaults(): Promise<void> {
   await upsertClasses([{ name: 'Senior 1', level: 'O', streams: [], assessments: [] }]);
 }
 
+// The marks of every assessment, keyed by the blob ids the browser already
+// holds. Shape is fixed by 006_scores_read_overlay.sql.
+type ScoresOverlay = Record<string, {
+  general?: Record<string, number | null>;
+  subjects?: Record<string, Record<string, number | null>>;
+  papers?: Record<string, Record<string, Record<string, number | null>>>;
+}>;
+
+// Release 2, step 4c: read the marks out of public.scores.
+//
+// One RPC rather than a select, because the function returns the whole set as
+// a single jsonb value: PostgREST caps a response at db-max-rows (1000 by
+// default) and there are ~31553 marks, so a table select would come back
+// truncated without saying so.
+//
+// A failure here is logged and swallowed, like the Release 1 sync. Throwing
+// would take down /api/classes and /api/assessments - the class list, the
+// student list and every report - over the marks of one release. Swallowing
+// means the blob's own marks are served instead, which is exactly what the app
+// showed before 4b, so the degradation is visible rather than destructive. It
+// also covers the window after 006 runs and before PostgREST has reloaded its
+// schema cache.
+async function readScoresOverlay(): Promise<ScoresOverlay> {
+  try {
+    const { data, error } = await getSupabaseAdmin().rpc('assessment_scores_overlay');
+    if (error) throw new Error(error.message);
+    return (data && typeof data === 'object' ? data : {}) as ScoresOverlay;
+  } catch (error) {
+    console.error('Score overlay read failed (serving the blob\'s own marks):', error);
+    return {};
+  }
+}
+
+// Write the rows over the blob's marks, mark by mark.
+//
+// The blob stays the base, it is not replaced. It still holds the structure,
+// and it holds the ~95 marks whose student has no row (deleted students, and
+// students the seed could not map) - replacing the maps wholesale would delete
+// those from every report and marksheet, and 4b would then re-add them on the
+// next save of the blob anyway. Merging keeps them.
+//
+// The row always wins, including when it holds NULL: a cleared mark is a row
+// with a null score, and that null has to reach the client to clear the blob's
+// stale value rather than silently falling back to it.
+//
+// Known limitation (documented in 006): renaming a subject in class management
+// rewrites the blob's key but not the row, so a stale subject name reappears
+// next to the new one until the rows are renamed too.
+function applyScoresOverlay(classes: any[], overlay: ScoresOverlay): any[] {
+  if (classes.length === 0) return classes;
+
+  return classes.map((classItem: any) => {
+    if (!Array.isArray(classItem?.assessments)) return classItem;
+    return {
+      ...classItem,
+      assessments: classItem.assessments.map((assessment: any) => {
+        const marks = overlay?.[assessment?.id];
+        if (!marks) return assessment;
+
+        const scores = { ...(assessment.scores || {}) };
+        Object.entries(marks.general || {}).forEach(([studentId, score]) => {
+          scores[studentId] = score;
+        });
+
+        const subjectScores = { ...(assessment.subjectScores || {}) };
+        Object.entries(marks.subjects || {}).forEach(([subjectName, innerMarks]) => {
+          subjectScores[subjectName] = { ...(subjectScores[subjectName] || {}), ...innerMarks };
+        });
+
+        const paperScores = { ...(assessment.paperScores || {}) };
+        Object.entries(marks.papers || {}).forEach(([subjectName, papers]) => {
+          const mergedPapers = { ...(paperScores[subjectName] || {}) };
+          Object.entries(papers || {}).forEach(([paperName, innerMarks]) => {
+            mergedPapers[paperName] = { ...(mergedPapers[paperName] || {}), ...innerMarks };
+          });
+          paperScores[subjectName] = mergedPapers;
+        });
+
+        return { ...assessment, scores, subjectScores, paperScores };
+      }),
+    };
+  });
+}
+
+// Structure comes from the blob, marks come from the rows (Release 2, 4c).
 export async function serializeClasses(): Promise<any[]> {
-  return (await readState()).classes;
+  const [state, overlay] = await Promise.all([readState(), readScoresOverlay()]);
+  return applyScoresOverlay(state.classes, overlay);
 }
 
 export async function upsertClasses(classes: any[], force = false): Promise<void> {
@@ -493,44 +579,64 @@ export async function setCurrentTermId(id: string): Promise<void> {
   await writeState({ ...state, academic_years: academicYears, current_term_id: id });
 }
 
-async function updateAssessmentInState(assessmentId: string, update: (assessment: any) => void): Promise<void> {
-  const state = await readState();
-  const classes = state.classes.map((classItem: any) => ({
-    ...classItem,
-    assessments: (classItem.assessments || []).map((assessment: any) => {
-      if (assessment.id !== assessmentId) return assessment;
-      const updated = { ...assessment };
-      update(updated);
-      return updated;
-    }),
+// Release 2's write path. Marks go to public.scores, never to the blob.
+//
+// The three functions this replaces each read the whole ~900 KB school_state
+// row, edited one entry, and wrote the whole row back - so two teachers entering
+// marks at the same time both locked that row, both downloaded it, and the loser
+// was rejected with PGRST116. A mark is one row in public.scores, keyed by the
+// deterministic id 003 seeded it with, so nothing here reads or writes the blob
+// and two teachers writing different students touch different rows.
+//
+// This is the only place the browser's ids meet the relational ones: the ids
+// arrive as the blob's string ids (assessment "asm...", student "stu...") and
+// the database resolves them through assessments.blob_id / students.blob_id.
+// Doing it in SQL rather than here is deliberate - the id formula then lives
+// next to the seed that produced the ids, in public.blob_score_id().
+export type ScoreMark = {
+  assessmentId: string;
+  studentId: string;
+  type: 'general' | 'subject' | 'paper';
+  score: number | null;
+  subjectName?: string;
+  paperName?: string;
+};
+
+export type ScoreWriteReport = {
+  received: number;
+  written: number;
+  unmappedStudents: string[];
+  unmappedAssessments: string[];
+};
+
+export async function upsertAssessmentScores(marks: ScoreMark[]): Promise<ScoreWriteReport> {
+  if (marks.length === 0) {
+    return { received: 0, written: 0, unmappedStudents: [], unmappedAssessments: [] };
+  }
+
+  // `type` is how the client thinks about a mark; what the table stores is the
+  // (subject, paper) pair, and blanks are the absent halves. blob_score_value()
+  // in the database is what decides whether `score` is a number at all, so this
+  // passes it through rather than second-guessing it here.
+  const payload = marks.map((mark) => ({
+    assessment: mark.assessmentId,
+    student: mark.studentId,
+    subject: mark.type === 'general' ? '' : (mark.subjectName || ''),
+    paper: mark.type === 'paper' ? (mark.paperName || '') : '',
+    score: mark.score === undefined ? null : mark.score,
   }));
-  const found = classes.some((classItem: any) => (classItem.assessments || []).some((assessment: any) => assessment.id === assessmentId));
-  if (!found) throw new Error('Assessment not found');
-  await writeState({ ...state, classes });
-}
 
-export async function updateAssessmentScore(assessmentId: string, studentId: string, score: number | null): Promise<void> {
-  await updateAssessmentInState(assessmentId, (assessment) => {
-    assessment.scores = { ...(assessment.scores || {}), [studentId]: score };
-  });
-}
+  const { data, error } = await getSupabaseAdmin()
+    .rpc('upsert_assessment_scores', { p_marks: payload });
+  if (error) throw new Error(`Score write failed: ${error.message}`);
 
-export async function updateAssessmentSubjectScore(assessmentId: string, subjectName: string, studentId: string, score: number | null): Promise<void> {
-  await updateAssessmentInState(assessmentId, (assessment) => {
-    assessment.subjectScores = { ...(assessment.subjectScores || {}) };
-    assessment.subjectScores[subjectName] = { ...(assessment.subjectScores[subjectName] || {}), [studentId]: score };
-  });
-}
-
-export async function updateAssessmentPaperScore(assessmentId: string, subjectName: string, paperName: string, studentId: string, score: number | null): Promise<void> {
-  await updateAssessmentInState(assessmentId, (assessment) => {
-    assessment.paperScores = { ...(assessment.paperScores || {}) };
-    assessment.paperScores[subjectName] = { ...(assessment.paperScores[subjectName] || {}) };
-    assessment.paperScores[subjectName][paperName] = {
-      ...(assessment.paperScores[subjectName][paperName] || {}),
-      [studentId]: score,
-    };
-  });
+  const report = (data || {}) as Record<string, unknown>;
+  return {
+    received: Number(report.received ?? marks.length),
+    written: Number(report.written ?? 0),
+    unmappedStudents: (report.unmapped_students as string[]) || [],
+    unmappedAssessments: (report.unmapped_assessments as string[]) || [],
+  };
 }
 
 export async function updateStudentSubjects(studentId: string, subjects: string[], optionalSubjects: string[]): Promise<void> {

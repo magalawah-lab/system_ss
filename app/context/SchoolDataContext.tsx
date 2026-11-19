@@ -351,6 +351,25 @@ function makeId(prefix: string) {
   return `${prefix}${Math.random().toString(36).slice(2, 9)}`;
 }
 
+// Identity of one mark, matching the tuple the database keys a scores row by:
+// (assessment, student, subject, paper). `type` is in the key because a general
+// mark and a subject mark for the same assessment and student are two different
+// rows. Two edits to the same mark collapse to one queued entry, so the batch a
+// teacher's typing produces is one entry per mark they touched, not one per
+// keystroke.
+export type QueuedMark = {
+  assessmentId: string;
+  studentId: string;
+  type: 'general' | 'subject' | 'paper';
+  score: number | null;
+  subjectName?: string;
+  paperName?: string;
+};
+
+function markKey(mark: QueuedMark) {
+  return `${mark.assessmentId}|${mark.studentId}|${mark.type}|${mark.subjectName ?? ''}|${mark.paperName ?? ''}`;
+}
+
 export function toSubjectName(subject: SubjectEntry | string) {
   return typeof subject === 'string' ? subject : subject.name;
 }
@@ -433,13 +452,19 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
   const [isSaving, setIsSaving] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
 
+  // `scores` is separate from `classes` on purpose. A mark no longer changes
+  // `classes`, because the classes save rewrites the whole ~900 KB
+  // school_state blob - doing that for a mark is the bug this migration exists
+  // to remove. A mark sets `scores` instead, which flushes to
+  // /api/assessments/scores and writes one row per mark.
   const [dirty, setDirty] = useState({
     classes: false,
+    scores: false,
     teachers: false,
     catalog: false
   });
 
-  const hasUnsavedChanges = dirty.classes || dirty.teachers || dirty.catalog;
+  const hasUnsavedChanges = dirty.classes || dirty.scores || dirty.teachers || dirty.catalog;
 
   const [localSnapshotsLoaded, setLocalSnapshotsLoaded] = useState(false);
 
@@ -644,6 +669,14 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
   // Consecutive failed auto-saves. Drives the retry backoff in the auto-save
   // effect so a project that is refusing writes is not rewritten every 3s.
   const saveFailures = useRef(0);
+  // Marks waiting to be written to public.scores, keyed by markKey(). Declared
+  // here rather than next to the flush below because the unload handler reads
+  // it too. Nothing in here touches the classes blob.
+  const markQueue = useRef<Map<string, QueuedMark>>(new Map());
+  // Serialises mark flushes the same way classSaveQueue serialises class saves:
+  // one request at a time, in order, so an older batch can never land after a
+  // newer one and put a stale value back.
+  const markSaveQueue = useRef(Promise.resolve());
 
   // Warn user if leaving while saving or with unsaved changes, plus best-effort beacon save
   useEffect(() => {
@@ -655,7 +688,7 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
       // reliably survives the unload.
       if (hasUnsavedChanges) {
         try {
-          if (dirty.classes) localStorage.setItem('school:classes_buffer', JSON.stringify(classes));
+          if (dirty.classes || dirty.scores) localStorage.setItem('school:classes_buffer', JSON.stringify(classes));
           if (dirty.teachers) localStorage.setItem('school:teachers_buffer', JSON.stringify(teachers));
           if (dirty.catalog) localStorage.setItem('school:catalog_buffer', JSON.stringify(catalog));
         } catch { /* storage full or unavailable */ }
@@ -664,6 +697,16 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
       // Best-effort synchronous flush to the server using sendBeacon
       if (hasUnsavedChanges && typeof navigator !== 'undefined' && 'sendBeacon' in navigator) {
         try {
+          // Unsent marks are the one payload small enough for a beacon: a batch
+          // of marks is a few hundred bytes, while the classes array is ~900 KB
+          // and is dropped by the browser's body cap. So marks get a real
+          // last-chance send here and everything else goes to localStorage.
+          if (markQueue.current.size > 0) {
+            const pendingMarks = Array.from(markQueue.current.values());
+            const marksBlob = new Blob([JSON.stringify({ marks: pendingMarks })], { type: 'application/json' });
+            try { navigator.sendBeacon(`${API_URL}/assessments/scores`, marksBlob); } catch (_) { /* ignore */ }
+          }
+
           const payload: any = {};
           if (dirty.classes) payload.classes = classes;
           if (dirty.teachers) payload.teachers = teachers;
@@ -699,17 +742,22 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
   // Sync data from server
   useEffect(() => {
     const hasBuffer = !!localStorage.getItem("school:classes_buffer");
+    // `!dirty.scores` as well as `!dirty.classes`: while a mark is queued but
+    // unsent, the server's copy of classes is the older one, and accepting it
+    // would wipe the mark off the screen. (Once 4c serves marks from
+    // public.scores this stops mattering, because the server's copy will carry
+    // the mark.)
     if (classesData &&
       JSON.stringify(classesData) !== JSON.stringify(lastSynced.current.classes) &&
       (Date.now() - lastUpdate.current.classes > 15000) &&
-      !isSaving && !syncError && !hasBuffer && !dirty.classes
+      !isSaving && !syncError && !hasBuffer && !dirty.classes && !dirty.scores
     ) {
       lastSynced.current.classes = classesData;
       const normalized = normalizeClasses(classesData);
       setClassesState(normalized);
       localStorage.setItem("school:classes_cache", JSON.stringify(normalized));
     }
-  }, [classesData, isSaving, syncError, dirty.classes]);
+  }, [classesData, isSaving, syncError, dirty.classes, dirty.scores]);
 
   useEffect(() => {
     const hasBuffer = !!localStorage.getItem("school:teachers_buffer");
@@ -792,6 +840,70 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     return classSaveQueue.current;
   }, [syncToServer]);
 
+  const queueMark = useCallback((mark: QueuedMark) => {
+    markQueue.current.set(markKey(mark), mark);
+    // Guarded so re-typing into the same field does not re-render the tree.
+    setDirty((d) => (d.scores ? d : { ...d, scores: true }));
+  }, []);
+
+  // Send everything queued as one batch. The map is drained before the request
+  // rather than after, so marks typed while it is in flight queue into a fresh
+  // map and go out in the next batch instead of being dropped.
+  const flushMarks = useCallback(() => {
+    markSaveQueue.current = markSaveQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (markQueue.current.size === 0) return;
+        const batch = Array.from(markQueue.current.values());
+        markQueue.current.clear();
+
+        try {
+          const response = await fetch(`${API_URL}/assessments/scores`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ marks: batch }),
+          });
+          if (!response.ok) {
+            const payload = await response.json().catch(() => null);
+            const message = payload && typeof payload === 'object' && 'error' in payload
+              ? String((payload as { error?: unknown }).error)
+              : `HTTP ${response.status}`;
+            // A 409 means some mark's student or assessment has no row to attach
+            // to yet. Retrying is right - it resolves once the structural sync
+            // has run - but it is worth seeing in the console.
+            throw new Error(message);
+          }
+        } catch (error) {
+          // Put the batch back so a failed send is a retry, not a lost mark. A
+          // mark retyped during the request is already in the map and is left
+          // alone, because its value is newer than the one being retried.
+          batch.forEach((mark) => {
+            const key = markKey(mark);
+            if (!markQueue.current.has(key)) markQueue.current.set(key, mark);
+          });
+          throw error;
+        }
+
+        // Only clear the flag if the queue is genuinely empty; a mark typed
+        // during the request has just set it again.
+        if (markQueue.current.size === 0) {
+          setDirty((d) => (d.scores ? { ...d, scores: false } : d));
+        }
+      });
+    return markSaveQueue.current;
+  }, []);
+
+  // Update local classes without calling them "changed". A mark changes the
+  // classes array in memory - that is how every report and marksheet reads it -
+  // but it must not mark the blob dirty, or the next auto-save would rewrite the
+  // whole school_state row and we would be back to one full-blob write per
+  // keystroke. lastUpdate is still bumped so the server-push effect below does
+  // not overwrite the edit before it has been sent.
+  const setClassesFromMark = useCallback((updater: React.SetStateAction<ClassItem[]>) => {
+    lastUpdate.current.classes = Date.now();
+    setClassesState(updater);
+  }, []);
+
   const setClasses = useCallback((updater: React.SetStateAction<ClassItem[]>) => {
     setDirty(d => ({ ...d, classes: true }));
     lastUpdate.current.classes = Date.now();
@@ -846,13 +958,23 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         // "The data changed in another session" errors.
         await persistClassesImmediately(classes);
       }
+      if (dirty.scores) {
+        // Marks go to public.scores as a batch of single-row writes. They do not
+        // touch school_state, so this can run alongside a classes save without
+        // the two colliding on the blob's revision guard - which is the whole
+        // point of the split.
+        await flushMarks();
+      }
       if (dirty.teachers) {
         await syncToServer('/teachers', teachers, `${API_URL}/teachers`, 'teachers');
       }
       if (dirty.catalog) {
         await syncToServer('/catalog', catalog, `${API_URL}/catalog`, 'catalog');
       }
-      setDirty({ classes: false, teachers: false, catalog: false });
+      // `scores` is deliberately not cleared here: flushMarks clears it only
+      // once the queue is empty, so a mark typed mid-flush keeps it set and is
+      // picked up by the next pass.
+      setDirty(d => ({ ...d, classes: false, teachers: false, catalog: false }));
       setSyncError(null);
       saveFailures.current = 0;
     } catch (e) {
@@ -862,7 +984,7 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     } finally {
       setIsSaving(false);
     }
-  }, [classes, teachers, catalog, dirty, persistClassesImmediately]);
+  }, [classes, teachers, catalog, dirty, persistClassesImmediately, flushMarks]);
 
   // Crash-recovery buffer for local edits. This used to run inside the setClasses
   // state updater, which meant stringifying the whole ~900 KB classes array and
@@ -871,14 +993,14 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
   // same recovery guarantee (the unload handler flushes synchronously) without
   // paying the cost per keystroke.
   useEffect(() => {
-    if (!dirty.classes) return;
+    if (!dirty.classes && !dirty.scores) return;
     const timer = setTimeout(() => {
       try {
         localStorage.setItem('school:classes_buffer', JSON.stringify(classes));
       } catch { /* storage full or unavailable */ }
     }, 1000);
     return () => clearTimeout(timer);
-  }, [classes, dirty.classes]);
+  }, [classes, dirty.classes, dirty.scores]);
 
   // Auto-save changes after a brief delay.
   //
@@ -896,7 +1018,7 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     const retryDelay = failures === 0 ? 3000 : Math.min(3000 * 2 ** failures, 60000);
 
     const debounceTimer = setTimeout(() => {
-      if (dirty.classes || dirty.teachers || dirty.catalog) {
+      if (dirty.classes || dirty.scores || dirty.teachers || dirty.catalog) {
         console.log('Auto-saving changes (debounce)...');
         saveChanges().catch(e => console.error('Auto-save failed:', e));
       }
@@ -1476,7 +1598,7 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
   }, [classes, setClasses, persistClassesImmediately]);
 
   const setScoreForAssessment = useCallback((classIndex: number, assessmentId: string, studentId: string, score: number | null) => {
-    setClasses((prev) => prev.map((cls, index) => {
+    setClassesFromMark((prev) => prev.map((cls, index) => {
       if (index !== classIndex) return cls;
       return {
         ...cls,
@@ -1487,15 +1609,15 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         )),
       };
     }));
-    // No per-keystroke write here. /api/assessments/scores rewrites the same
-    // school_state row as the bulk classes save, so firing it on every
-    // keystroke duplicates the entire blob write and races the bulk save.
-    // Durability is provided by the debounced save, the 8s watchdog, and the
-    // sendBeacon flush on unload.
-  }, [setClasses]);
+    // Local state only. The mark is queued for public.scores and the classes
+    // blob is left alone - a mark is one ~60 byte row, so sending it by
+    // rewriting the ~900 KB school_state row (what this used to do, 3s later,
+    // through dirty.classes) is the write amplification this migration removes.
+    queueMark({ assessmentId, studentId, type: 'general', score });
+  }, [setClassesFromMark, queueMark]);
 
   const setSubjectScoreForAssessment = useCallback((classIndex: number, assessmentId: string, subjectName: string, studentId: string, score: number | null) => {
-    setClasses((prev) => prev.map((cls, index) => {
+    setClassesFromMark((prev) => prev.map((cls, index) => {
       if (index !== classIndex) return cls;
       return {
         ...cls,
@@ -1515,11 +1637,11 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         )),
       };
     }));
-    // See setScoreForAssessment: the bulk classes save already persists this.
-  }, [setClasses]);
+    queueMark({ assessmentId, studentId, type: 'subject', subjectName, score });
+  }, [setClassesFromMark, queueMark]);
 
   const setPaperScoreForAssessment = useCallback((classIndex: number, assessmentId: string, subjectName: string, paperName: string, studentId: string, score: number | null) => {
-    setClasses((prev) => prev.map((cls, index) => {
+    setClassesFromMark((prev) => prev.map((cls, index) => {
       if (index !== classIndex) return cls;
       return {
         ...cls,
@@ -1542,8 +1664,9 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         )),
       };
     }));
-    // See setScoreForAssessment: the bulk classes save already persists this.
-  }, [setClasses]);
+    // See setScoreForAssessment: the mark goes to public.scores, not the blob.
+    queueMark({ assessmentId, studentId, type: 'paper', subjectName, paperName, score });
+  }, [setClassesFromMark, queueMark]);
 
   const updateAssessmentInClass = useCallback((classIndex: number, assessmentId: string, updates: Partial<Assessment>) => {
     const nextClasses = classes.map((cls, index) => {
