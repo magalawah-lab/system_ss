@@ -561,27 +561,35 @@ export async function getTeachers(): Promise<any[]> {
   return readColumn<any[]>('teachers', []);
 }
 
-export async function replaceTeachers(teachers: any[]): Promise<void> {
+// Each of the writers below returns the revision it left behind. Every one of
+// them moves the blob on by one, and a caller that is not told has a copy that
+// looks stale the next time it saves a different part of the school - which the
+// revision guard then refuses. Telling the caller is what keeps that guard
+// meaning "someone else changed this", not "you changed something else".
+export async function replaceTeachers(teachers: any[]): Promise<number> {
   const state = await readState();
-  await writeState({ ...state, teachers: Array.isArray(teachers) ? teachers : [] });
+  const saved = await writeState({ ...state, teachers: Array.isArray(teachers) ? teachers : [] });
+  return saved.revision;
 }
 
 export async function getCatalog(): Promise<Record<string, SubjectCategory>> {
   return readColumn<Record<string, SubjectCategory>>('catalog', {});
 }
 
-export async function replaceCatalog(catalog: Record<string, SubjectCategory>): Promise<void> {
+export async function replaceCatalog(catalog: Record<string, SubjectCategory>): Promise<number> {
   const state = await readState();
-  await writeState({ ...state, catalog: catalog && typeof catalog === 'object' ? catalog : {} });
+  const saved = await writeState({ ...state, catalog: catalog && typeof catalog === 'object' ? catalog : {} });
+  return saved.revision;
 }
 
 export async function getAcademicYears(): Promise<any[]> {
   return readColumn<any[]>('academic_years', []);
 }
 
-export async function saveAcademicYears(years: any[]): Promise<void> {
+export async function saveAcademicYears(years: any[]): Promise<number> {
   const state = await readState();
-  await writeState({ ...state, academic_years: Array.isArray(years) ? years : [] });
+  const saved = await writeState({ ...state, academic_years: Array.isArray(years) ? years : [] });
+  return saved.revision;
 }
 
 export async function getCurrentAcademicYearId(): Promise<string> {
@@ -595,19 +603,21 @@ export async function getCurrentTermId(): Promise<string> {
   return year?.terms?.find((term: any) => term.isActive)?.id || year?.terms?.[0]?.id || '';
 }
 
-export async function setCurrentAcademicYearId(id: string): Promise<void> {
+export async function setCurrentAcademicYearId(id: string): Promise<number> {
   const state = await readState();
   const academicYears = state.academic_years.map((year: any) => ({ ...year, isActive: year.id === id }));
-  await writeState({ ...state, academic_years: academicYears, current_academic_year_id: id });
+  const saved = await writeState({ ...state, academic_years: academicYears, current_academic_year_id: id });
+  return saved.revision;
 }
 
-export async function setCurrentTermId(id: string): Promise<void> {
+export async function setCurrentTermId(id: string): Promise<number> {
   const state = await readState();
   const academicYears = state.academic_years.map((year: any) => ({
     ...year,
     terms: (year.terms || []).map((term: any) => ({ ...term, isActive: term.id === id })),
   }));
-  await writeState({ ...state, academic_years: academicYears, current_term_id: id });
+  const saved = await writeState({ ...state, academic_years: academicYears, current_term_id: id });
+  return saved.revision;
 }
 
 // Release 2's write path. Marks go to public.scores, never to the blob.
@@ -670,7 +680,11 @@ export async function upsertAssessmentScores(marks: ScoreMark[]): Promise<ScoreW
   };
 }
 
-export async function updateStudentSubjects(studentId: string, subjects: string[], optionalSubjects: string[]): Promise<void> {
+// Reallocating a student's subjects is a targeted write: it moves one student
+// inside the classes array and never touches the marks. It is still a blob
+// write, so it moves the school's revision on - and returns it, because the
+// browser that asked for the change is the one that will save next.
+export async function updateStudentSubjects(studentId: string, subjects: string[], optionalSubjects: string[]): Promise<number> {
   const state = await readState();
   const classes = state.classes.map((classItem: any) => ({
     ...classItem,
@@ -681,10 +695,14 @@ export async function updateStudentSubjects(studentId: string, subjects: string[
       )),
     })),
   }));
-  await writeState({ ...state, classes });
+  const saved = await writeState({ ...state, classes });
+  return saved.revision;
 }
 
-export async function updateTeacherAssignment(className: string, streamName: string, type: 'subject' | 'class', teacherId: string | null, subjectName?: string, initials?: string): Promise<void> {
+// Same as above for a teacher assignment - a subject teacher or a class teacher.
+// The classes array is the blob's, so the caller is told where the revision
+// landed.
+export async function updateTeacherAssignment(className: string, streamName: string, type: 'subject' | 'class', teacherId: string | null, subjectName?: string, initials?: string): Promise<number> {
   const state = await readState();
   let found = false;
   const classes = state.classes.map((classItem: any) => {
@@ -705,7 +723,8 @@ export async function updateTeacherAssignment(className: string, streamName: str
     };
   });
   if (!found) throw new Error('Class stream not found');
-  await writeState({ ...state, classes });
+  const saved = await writeState({ ...state, classes });
+  return saved.revision;
 }
 
 export async function exportBackup(): Promise<any> {

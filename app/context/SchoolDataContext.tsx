@@ -56,6 +56,25 @@ function writeClassesBuffer(classes: unknown, revision: number) {
   localStorage.setItem(CLASSES_BUFFER_REVISION_KEY, String(revision));
 }
 
+// Adopt the revision a write reported leaving behind.
+//
+// Every write to school_state moves the revision on, and the browser has to
+// adopt the new number: the revision it names on its next save is what the
+// server checks, so a client that is not told is holding a copy that looks
+// stale, and its next save is refused as if another session had changed the
+// data - even though the write that moved the revision was its own.
+//
+// The higher of the two wins rather than the latest reply, because two writes
+// from this tab can answer out of order, and the reply to the older one names
+// the older revision.
+async function adoptRevision(response: Response, target: { current: number }): Promise<void> {
+  const payload = await response.json().catch(() => null);
+  const revision = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? (payload as { revision?: unknown }).revision
+    : undefined;
+  if (typeof revision === 'number' && revision > target.current) target.current = revision;
+}
+
 export type SubjectCategory = 'compulsory' | 'optional';
 
 export type Assessment = {
@@ -559,6 +578,14 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
   // client (admin, teachers) shares the same year/term IDs. Assessment year/term
   // references in the DB would otherwise drift across browsers (IDs were Date.now()-based).
   const academicYearsSyncedRef = useRef(false);
+  // The academic years the server is known to hold, as JSON.
+  //
+  // Adopting the server's years into state used to be enough to make the effect
+  // below POST them straight back: every page load rewrote the whole ~900 KB
+  // school_state row to store a copy of what was already in it, and moved its
+  // revision on. That is what made the first save from a freshly loaded tab look
+  // like it was built on a stale copy.
+  const academicYearsOnServer = useRef('');
 
   useEffect(() => {
     let cancelled = false;
@@ -573,6 +600,7 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         if (Array.isArray(serverYears) && serverYears.length > 0) {
           // Server is authoritative: adopt its years and re-derive the active period.
           setAcademicYearsState(serverYears);
+          academicYearsOnServer.current = JSON.stringify(serverYears);
           localStorage.setItem('academicYears', JSON.stringify(serverYears));
 
           const savedYearId = localStorage.getItem('currentAcademicYearId');
@@ -601,11 +629,15 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
           if (localRaw) {
             const local = JSON.parse(localRaw);
             if (Array.isArray(local) && local.length > 0) {
-              await fetch(`${API_URL}/academic-years`, {
+              const response = await fetch(`${API_URL}/academic-years`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(local),
               });
+              // This is the seed of the years, so the effect below has nothing
+              // left to send - but it did move the row's revision on.
+              academicYearsOnServer.current = JSON.stringify(local);
+              if (response.ok) await adoptRevision(response, classesRevision);
             }
           }
         }
@@ -623,12 +655,29 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
   useEffect(() => {
     if (!academicYearsSyncedRef.current) return;
     if (!Array.isArray(academicYears) || academicYears.length === 0) return;
+
+    // Only when they actually differ from what the server holds. Taking the
+    // server's copy into state re-runs this effect, and sending that copy back
+    // was a full school_state rewrite for no change - on every page load.
+    const serialized = JSON.stringify(academicYears);
+    if (serialized === academicYearsOnServer.current) return;
+
     const timer = setTimeout(() => {
+      academicYearsOnServer.current = serialized;
       fetch(`${API_URL}/academic-years`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(academicYears),
-      }).catch((e) => console.warn('Failed to save academic years:', e));
+        body: serialized,
+      })
+        // Saving the years rewrites school_state, so it moves the revision on.
+        // Nothing here waits for the response, which is exactly why it has to be
+        // read: the next classes save from this tab would name the revision from
+        // before this write and be refused as if another session had saved.
+        .then(async (response) => {
+          if (!response.ok) return;
+          await adoptRevision(response, classesRevision);
+        })
+        .catch((e) => console.warn('Failed to save academic years:', e));
     }, 800);
     return () => clearTimeout(timer);
   }, [academicYears]);
@@ -821,7 +870,15 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
       }
     }
 
-    const hasBuffer = !!localStorage.getItem("school:classes_buffer");
+    // `dirty.classes` is the test for "this tab has edits the server has not
+    // seen", and deliberately not the presence of a buffer on disk. A buffer is
+    // written for unsent marks as well as for classes edits, so a tab that has
+    // only ever entered marks used to hold a buffer and refuse the server's
+    // classes for as long as it stayed open - it never picked up a student
+    // reallocated in another tab. A buffer restored at load is still respected:
+    // restoring one sets dirty.classes, and a buffer older than the server's
+    // revision is discarded instead of kept.
+    //
     // `!dirty.scores` as well as `!dirty.classes`: while a mark is queued but
     // unsent, the server's copy of classes is the older one, and accepting it
     // would wipe the mark off the screen. (Once 4c serves marks from
@@ -830,7 +887,7 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     if (classesData &&
       JSON.stringify(classesData) !== JSON.stringify(lastSynced.current.classes) &&
       (Date.now() - lastUpdate.current.classes > 15000) &&
-      !isSaving && !syncError && !hasBuffer && !dirty.classes && !dirty.scores
+      !isSaving && !syncError && !dirty.classes && !dirty.scores
     ) {
       lastSynced.current.classes = classesData;
       classesRevision.current = classesData.revision;
@@ -897,10 +954,11 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         throw new Error(`HTTP ${response.status}: ${errorDetails}`);
       }
 
-      const result = category === 'classes'
-        ? await response.json().catch(() => null) as { revision?: number } | null
-        : null;
-      if (result && typeof result.revision === 'number') classesRevision.current = result.revision;
+      // Every one of these endpoints rewrites school_state, so every one of them
+      // moves the revision on and reports where it landed. Adopting it here is
+      // what keeps the guard meaning "another session changed this" rather than
+      // "this tab changed something else a moment ago".
+      await adoptRevision(response, classesRevision);
 
       // The SWR cache mirrors what the endpoint answers with, so classes are
       // cached wrapped in their revision, the same shape GET returns.
@@ -1081,7 +1139,11 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
       setSyncError(null);
     } catch (e) {
       console.error('Failed to save changes:', e);
-      setSyncError('Failed to save some changes. Please try again.');
+      // A refused save has already been described by syncToServer, and its
+      // explanation - that the copy being saved is out of date - is the one the
+      // user needs. Overwriting it with "please try again" invites a retry that
+      // cannot work.
+      setSyncError((previous) => previous ?? 'Failed to save some changes. Please try again.');
     } finally {
       setIsSaving(false);
     }
@@ -1479,6 +1541,8 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
           // The targeted write did not land, so put the edit back on the blob
           // path instead of leaving it stranded in this tab.
           setDirty(d => ({ ...d, classes: true }));
+        } else {
+          await adoptRevision(response, classesRevision);
         }
       } catch (e) {
         console.error('Failed to update subject teacher remotely:', e);
@@ -1583,6 +1647,13 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
           // The targeted write did not land, so put the edit back on the blob
           // path instead of leaving it stranded in this tab.
           setDirty(d => ({ ...d, classes: true }));
+        } else {
+          // The reallocation went in against the blob, so this tab's copy of the
+          // school is one revision behind until it takes the new number. Without
+          // this the save that follows - the save that would persist everything
+          // else the teacher has done - is refused as if another session had
+          // changed the data.
+          await adoptRevision(response, classesRevision);
         }
       } catch (e) {
         console.error('Failed to update student subjects remotely:', e);
@@ -1664,6 +1735,8 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         // The targeted write did not land, so put the edit back on the blob path
         // instead of leaving it stranded in this tab.
         setDirty(d => ({ ...d, classes: true }));
+      } else {
+        await adoptRevision(response, classesRevision);
       }
     } catch (e) {
       console.error('Failed to update class teacher remotely:', e);

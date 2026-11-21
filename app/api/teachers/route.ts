@@ -16,23 +16,27 @@ export async function POST(request: Request) {
   try {
     const body = await request.json() as Teacher[] | (Omit<Teacher, 'id'> & { id?: string });
 
+    // Every branch below rewrites the school_state row, so each one moves the
+    // revision on and reports where it landed. A browser that saves teachers
+    // and then classes would otherwise name a revision the row no longer holds
+    // on its classes save, and that save would be refused.
     if (Array.isArray(body)) {
-      await replaceTeachers(body);
-      return NextResponse.json(await getTeachers(), { status: 200 });
+      const revision = await replaceTeachers(body);
+      return NextResponse.json({ revision, teachers: await getTeachers() }, { status: 200 });
     }
 
     if (body.id) {
       const next = (await getTeachers()).map((teacher: any) => (
         teacher.id === body.id ? { ...teacher, ...body } : teacher
       ));
-      await replaceTeachers(next);
-      return NextResponse.json({ success: true });
+      const revision = await replaceTeachers(next);
+      return NextResponse.json({ success: true, revision });
     }
 
     const id = crypto.randomUUID().slice(0, 9);
     const next = [...(await getTeachers()), { ...body, id }];
-    await replaceTeachers(next);
-    return NextResponse.json({ id }, { status: 201 });
+    const revision = await replaceTeachers(next);
+    return NextResponse.json({ id, revision }, { status: 201 });
   } catch (error) {
     console.error('Teachers API error:', error);
     return NextResponse.json({ error: (error as Error).message }, { status: 400 });

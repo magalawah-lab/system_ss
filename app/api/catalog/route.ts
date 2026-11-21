@@ -32,22 +32,27 @@ export async function POST(request: Request) {
 
       const current = await getCatalog();
       const updated = { ...current, [subject]: category };
-      await replaceCatalog(updated);
+      // Rewriting the catalog rewrites the school_state row, so it moves the
+      // revision on. The caller is told where it landed; otherwise its next
+      // classes save names a revision the row no longer holds and is refused.
+      const revision = await replaceCatalog(updated);
       
       return NextResponse.json({ 
         success: true, 
         message: `Subject "${subject}" categorized as "${category}"`,
-        catalog: updated 
+        catalog: updated,
+        revision
       });
     }
 
     // Case 2: Full catalog replacement
     if (body && typeof body === 'object') {
-      await replaceCatalog(body);
+      const revision = await replaceCatalog(body);
       return NextResponse.json({ 
         success: true, 
         message: 'Catalog updated successfully',
-        catalog: getCatalog() 
+        catalog: getCatalog(),
+        revision
       });
     }
 
