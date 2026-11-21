@@ -691,9 +691,6 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
   // arrives; after that its revision is settled and cannot change underneath us.
   const bufferChecked = useRef(false);
   const pendingSyncs = useRef<Set<string>>(new Set());
-  // Consecutive failed auto-saves. Drives the retry backoff in the auto-save
-  // effect so a project that is refusing writes is not rewritten every 3s.
-  const saveFailures = useRef(0);
   // Marks waiting to be written to public.scores, keyed by markKey(). Declared
   // here rather than next to the flush below because the unload handler reads
   // it too. Nothing in here touches the classes blob.
@@ -1000,10 +997,11 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
 
   // Update local classes without calling them "changed". A mark changes the
   // classes array in memory - that is how every report and marksheet reads it -
-  // but it must not mark the blob dirty, or the next auto-save would rewrite the
-  // whole school_state row and we would be back to one full-blob write per
-  // keystroke. lastUpdate is still bumped so the server-push effect below does
-  // not overwrite the edit before it has been sent.
+  // but it must not mark the blob dirty, or the next Save would rewrite the whole
+  // school_state row and we would be back to one full-blob write per marksheet.
+  // The mark itself travels to public.scores through flushMarks. lastUpdate is
+  // still bumped so the server-push effect below does not overwrite the edit
+  // before it has been sent.
   const setClassesFromMark = useCallback((updater: React.SetStateAction<ClassItem[]>) => {
     lastUpdate.current.classes = Date.now();
     setClassesState(updater);
@@ -1081,10 +1079,8 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
       // picked up by the next pass.
       setDirty(d => ({ ...d, classes: false, teachers: false, catalog: false }));
       setSyncError(null);
-      saveFailures.current = 0;
     } catch (e) {
       console.error('Failed to save changes:', e);
-      saveFailures.current += 1;
       setSyncError('Failed to save some changes. Please try again.');
     } finally {
       setIsSaving(false);
@@ -1107,30 +1103,14 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     return () => clearTimeout(timer);
   }, [classes, dirty.classes, dirty.scores]);
 
-  // Auto-save changes after a brief delay.
-  //
-  // Every save rewrites the whole ~900 KB classes blob, so the retry interval
-  // matters as much as the save itself. A failed save leaves `dirty` set, and
-  // clearing and re-arming `isSaving` re-runs this effect, which used to retry
-  // 3s later (and again on a separate 8s watchdog). While the project is
-  // IO-throttled that is an endless loop of megabyte writes that starves the
-  // reads the login page needs. Back off geometrically instead, and stop at a
-  // ceiling so a wedged project is retried steadily rather than hammered.
-  useEffect(() => {
-    if (!hasUnsavedChanges || isSaving) return;
-
-    const failures = saveFailures.current;
-    const retryDelay = failures === 0 ? 3000 : Math.min(3000 * 2 ** failures, 60000);
-
-    const debounceTimer = setTimeout(() => {
-      if (dirty.classes || dirty.scores || dirty.teachers || dirty.catalog) {
-        console.log('Auto-saving changes (debounce)...');
-        saveChanges().catch(e => console.error('Auto-save failed:', e));
-      }
-    }, retryDelay);
-
-    return () => clearTimeout(debounceTimer);
-  }, [hasUnsavedChanges, isSaving, saveChanges, dirty]);
+  // There is deliberately no auto-save here. It used to fire a few seconds after
+  // any edit, which meant every keystroke in the marksheet eventually rewrote the
+  // whole ~900 KB classes blob for no reason, and a project that refused writes
+  // was retried in a loop. Saving is now explicit: the Save button in the top
+  // bar, or one of the per-page save buttons, calls saveChanges() directly. The
+  // unload handler below still flushes the buffers on close, so nothing typed is
+  // lost by navigating away - but work in a tab left open is only saved when
+  // someone presses Save.
 
   // One-time migration: rename legacy A-Level subject names to the canonical
   // UACE names so existing data lines up with the new subject structure.

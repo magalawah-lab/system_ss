@@ -380,7 +380,16 @@ async function writeState(state: State, expectedRevision?: number): Promise<Stat
     revision: nextRevision,
     updated_at: new Date().toISOString(),
   };
-  const guard = typeof expectedRevision === 'number' ? expectedRevision : state.revision;
+  // The caller's revision is the guard, but a caller that has not heard from the
+  // server yet sends 0 - a tab whose classes came from the localStorage cache, or
+  // a data-repair effect that runs before the first GET lands. Zero is not a
+  // revision the row can ever hold, so honouring it would match no row and send
+  // the write down the "insert" path below, where it collides with the existing
+  // `default` row. Fall back to the revision we just read for that case only: a
+  // caller with a real revision is still held to it.
+  const guard = typeof expectedRevision === 'number' && expectedRevision > 0
+    ? expectedRevision
+    : state.revision;
   // Request only the columns the revision guard needs. Selecting '*' makes
   // PostgREST send the whole row back, and the row is a ~900 KB TOASTed JSONB
   // blob we already hold in memory, so every save downloaded a second full copy
