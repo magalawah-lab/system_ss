@@ -364,7 +364,15 @@ async function syncRelationalStructure(state: State): Promise<void> {
   }
 }
 
-async function writeState(state: State): Promise<State> {
+// `expectedRevision` is the revision the caller built its payload from. It is
+// deliberately separate from state.revision: readState() immediately above the
+// write always returns the current revision, so guarding on it compared a value
+// against itself and could never reject anything. A client that loaded the
+// school an hour ago would then save its older copy over everyone else's work,
+// silently. Callers that omit it (seedDefaults, restoreBackup) get the old
+// read-then-write behaviour, which is correct for them because they are the
+// ones reading and deciding what the new state is.
+async function writeState(state: State, expectedRevision?: number): Promise<State> {
   const nextRevision = state.revision + 1;
   const payload = {
     ...state,
@@ -372,6 +380,7 @@ async function writeState(state: State): Promise<State> {
     revision: nextRevision,
     updated_at: new Date().toISOString(),
   };
+  const guard = typeof expectedRevision === 'number' ? expectedRevision : state.revision;
   // Request only the columns the revision guard needs. Selecting '*' makes
   // PostgREST send the whole row back, and the row is a ~900 KB TOASTed JSONB
   // blob we already hold in memory, so every save downloaded a second full copy
@@ -380,12 +389,12 @@ async function writeState(state: State): Promise<State> {
     .from('school_state')
     .update(payload)
     .eq('id', 'default')
-    .eq('revision', state.revision)
+    .eq('revision', guard)
     .select('id, revision')
     .single();
 
   if (error) {
-    if (error.code === 'PGRST116' && state.revision === 0) {
+    if (error.code === 'PGRST116' && guard === 0) {
       const { error: insertError } = await getSupabaseAdmin()
         .from('school_state')
         .insert(payload)
@@ -514,16 +523,29 @@ function applyScoresOverlay(classes: any[], overlay: ScoresOverlay): any[] {
 }
 
 // Structure comes from the blob, marks come from the rows (Release 2, 4c).
-export async function serializeClasses(): Promise<any[]> {
+//
+// The revision is returned with the classes so the browser can name the copy it
+// built its edits from and send that back on the next save. Without it a client
+// has no way to tell the server which version of the school it is overwriting.
+export async function serializeClassesWithRevision(): Promise<{ revision: number; classes: unknown[] }> {
   const [state, overlay] = await Promise.all([readState(), readScoresOverlay()]);
-  return applyScoresOverlay(state.classes, overlay);
+  return { revision: state.revision, classes: applyScoresOverlay(state.classes, overlay) };
 }
 
-export async function upsertClasses(classes: any[], force = false): Promise<void> {
+export async function serializeClasses(): Promise<any[]> {
+  return (await serializeClassesWithRevision()).classes;
+}
+
+// Writes the whole classes array back to the blob. `expectedRevision` is the
+// revision the caller's copy came from; pass it and a save built on a stale copy
+// is rejected instead of overwriting newer work. Returns the revision the row
+// now holds so the caller can base its next save on it.
+export async function upsertClasses(classes: any[], force = false, expectedRevision?: number): Promise<number> {
   const state = await readState();
-  const current = state.classes;
-  if (!force && classes.length === 0 && current.length > 0) return;
-  await writeState({ ...state, classes: Array.isArray(classes) ? classes : [] });
+  const next = Array.isArray(classes) ? classes : [];
+  if (!force && next.length === 0 && state.classes.length > 0) return state.revision;
+  const saved = await writeState({ ...state, classes: next }, expectedRevision);
+  return saved.revision;
 }
 
 export async function getTeachers(): Promise<any[]> {

@@ -43,6 +43,19 @@ function readLocalSnapshot<T>(key: string): T | undefined {
   }
 }
 
+// The classes crash-recovery buffer, together with the revision of the school
+// the buffered copy was built from. Both are written at the same moment, so they
+// cannot disagree, and the revision is what lets a buffer restored on the next
+// visit be recognised as older than the server's copy instead of being pushed
+// back over whatever was saved in between.
+const CLASSES_BUFFER_KEY = 'school:classes_buffer';
+const CLASSES_BUFFER_REVISION_KEY = 'school:classes_buffer_revision';
+
+function writeClassesBuffer(classes: unknown, revision: number) {
+  localStorage.setItem(CLASSES_BUFFER_KEY, JSON.stringify(classes));
+  localStorage.setItem(CLASSES_BUFFER_REVISION_KEY, String(revision));
+}
+
 export type SubjectCategory = 'compulsory' | 'optional';
 
 export type Assessment = {
@@ -409,8 +422,13 @@ function parseCsvLine(line: string) {
 
 const EMPTY_TEACHERS: Teacher[] = [];
 
+// What /api/classes answers with. The revision is the version of the school the
+// classes were read from, and every save sends it back so the server can tell
+// whether the copy being written is still the current one.
+type ClassesPayload = { revision: number; classes: ClassItem[] };
+
 export function SchoolDataProvider({ children }: { children: React.ReactNode }) {
-  const { data: classesData, error: classesError, isLoading: classesLoading } = useSWR<ClassItem[]>(
+  const { data: classesData, error: classesError, isLoading: classesLoading } = useSWR<ClassesPayload>(
     `${API_URL}/classes`,
     fetcher,
     {
@@ -665,6 +683,13 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
 
   const lastUpdate = useRef<Record<string, number>>({ classes: 0, teachers: 0, catalog: 0 });
   const lastSynced = useRef<Record<string, any>>({ classes: null, teachers: null, catalog: null });
+  // The version of the school the in-memory `classes` were built from. Sent as
+  // the save guard, and refreshed from every response, so a tab that is behind
+  // is refused instead of quietly deleting the work done since it loaded.
+  const classesRevision = useRef<number>(0);
+  // The restored buffer is judged once, the first time the server's copy
+  // arrives; after that its revision is settled and cannot change underneath us.
+  const bufferChecked = useRef(false);
   const pendingSyncs = useRef<Set<string>>(new Set());
   // Consecutive failed auto-saves. Drives the retry backoff in the auto-save
   // effect so a project that is refusing writes is not rewritten every 3s.
@@ -688,7 +713,7 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
       // reliably survives the unload.
       if (hasUnsavedChanges) {
         try {
-          if (dirty.classes || dirty.scores) localStorage.setItem('school:classes_buffer', JSON.stringify(classes));
+          if (dirty.classes || dirty.scores) writeClassesBuffer(classes, classesRevision.current);
           if (dirty.teachers) localStorage.setItem('school:teachers_buffer', JSON.stringify(teachers));
           if (dirty.catalog) localStorage.setItem('school:catalog_buffer', JSON.stringify(catalog));
         } catch { /* storage full or unavailable */ }
@@ -714,7 +739,10 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
           if (Object.keys(payload).length > 0) {
             // Send individual beacons to matching endpoints
             if (payload.classes) {
-              const blob = new Blob([JSON.stringify(payload.classes)], { type: 'application/json' });
+              const blob = new Blob(
+                [JSON.stringify({ revision: classesRevision.current, classes: payload.classes })],
+                { type: 'application/json' }
+              );
               try { navigator.sendBeacon(`${API_URL}/classes`, blob); } catch (_) { /* ignore */ }
             }
             if (payload.teachers) {
@@ -741,6 +769,61 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
 
   // Sync data from server
   useEffect(() => {
+    if (!classesData) return;
+
+    // Once, when the server's copy first arrives: decide what to do with a
+    // buffer restored at load, now that its revision is known.
+    //
+    // A buffer is a copy of the whole classes array, saved when an edit could
+    // not reach the server. Pushing it back is only safe while the server still
+    // holds that same version. If the server has moved on - another device
+    // saved, or this browser was closed long enough for someone else to work -
+    // writing the buffer would replace the newer structure with the older one.
+    // That is an edit appearing to "come back", and it undoes whatever was done
+    // in the meantime. In that case the server's copy wins and the buffer goes.
+    if (!bufferChecked.current) {
+      bufferChecked.current = true;
+      let buffered: string | null = null;
+      try {
+        buffered = localStorage.getItem(CLASSES_BUFFER_KEY);
+      } catch { /* storage unavailable */ }
+
+      if (!buffered) {
+        // Nothing pending locally, so what we hold is the server's copy.
+        classesRevision.current = classesData.revision;
+      } else {
+        // Buffers written before the revision was recorded are assumed to be
+        // based on what the server holds now, which is how they were treated
+        // before this check existed.
+        let recorded = NaN;
+        try {
+          recorded = Number(localStorage.getItem(CLASSES_BUFFER_REVISION_KEY));
+        } catch { /* storage unavailable */ }
+        const bufferedFrom = Number.isFinite(recorded) && recorded > 0 ? recorded : classesData.revision;
+
+        if (bufferedFrom < classesData.revision) {
+          try {
+            localStorage.removeItem(CLASSES_BUFFER_KEY);
+            localStorage.removeItem(CLASSES_BUFFER_REVISION_KEY);
+          } catch { /* storage unavailable */ }
+          setDirty(d => ({ ...d, classes: false }));
+          lastSynced.current.classes = classesData;
+          classesRevision.current = classesData.revision;
+          const normalized = normalizeClasses(classesData.classes);
+          setClassesState(normalized);
+          localStorage.setItem("school:classes_cache", JSON.stringify(normalized));
+          console.warn(
+            `Discarded a buffered classes copy based on revision ${bufferedFrom}; the server is at revision ${classesData.revision}.`
+          );
+          return;
+        }
+
+        // The buffer descends from the revision the server is serving, so this
+        // save is allowed to build on it.
+        classesRevision.current = bufferedFrom;
+      }
+    }
+
     const hasBuffer = !!localStorage.getItem("school:classes_buffer");
     // `!dirty.scores` as well as `!dirty.classes`: while a mark is queued but
     // unsent, the server's copy of classes is the older one, and accepting it
@@ -753,7 +836,8 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
       !isSaving && !syncError && !hasBuffer && !dirty.classes && !dirty.scores
     ) {
       lastSynced.current.classes = classesData;
-      const normalized = normalizeClasses(classesData);
+      classesRevision.current = classesData.revision;
+      const normalized = normalizeClasses(classesData.classes);
       setClassesState(normalized);
       localStorage.setItem("school:classes_cache", JSON.stringify(normalized));
     }
@@ -797,7 +881,12 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
       const response = await fetch(`${API_URL}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
+        // A classes save names the revision its copy was edited from, so the
+        // server can tell a save built on current data from one built on a copy
+        // that has since been superseded, and refuse the second.
+        body: JSON.stringify(
+          category === 'classes' ? { revision: classesRevision.current, classes: data } : data
+        ),
       });
 
       if (!response.ok) {
@@ -811,18 +900,34 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         throw new Error(`HTTP ${response.status}: ${errorDetails}`);
       }
 
-      lastSynced.current[category] = data;
+      const result = category === 'classes'
+        ? await response.json().catch(() => null) as { revision?: number } | null
+        : null;
+      if (result && typeof result.revision === 'number') classesRevision.current = result.revision;
+
+      // The SWR cache mirrors what the endpoint answers with, so classes are
+      // cached wrapped in their revision, the same shape GET returns.
+      const cached = category === 'classes'
+        ? { revision: classesRevision.current, classes: data }
+        : data;
+      lastSynced.current[category] = cached;
       lastUpdate.current[category] = Date.now();
       localStorage.removeItem(`school:${category}_buffer`);
+      if (category === 'classes') localStorage.removeItem(CLASSES_BUFFER_REVISION_KEY);
       // Seed the SWR cache with the payload we just persisted instead of
       // revalidating. A revalidate issues another full-blob read and download
       // of data we already have, doubling the cost of every save.
-      await mutate(mutateKey, data, { revalidate: false });
+      await mutate(mutateKey, cached, { revalidate: false });
       setSyncError(null);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       console.error(`Failed to sync ${endpoint}:`, e);
-      setSyncError(`Failed to save ${category}. Please check your connection.`);
+      // A save refused by the revision guard is not a connection problem, and
+      // no number of retries will make it succeed: the copy it is built on is
+      // out of date. Say so rather than blaming the network.
+      setSyncError(message.includes('another session')
+        ? 'This change was made against an older copy of the school data and was not saved. Reload the page to get the latest data, then make the change again.'
+        : `Failed to save ${category}. Please check your connection.`);
       throw e;
     } finally {
       pendingSyncs.current.delete(syncId);
@@ -996,7 +1101,7 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     if (!dirty.classes && !dirty.scores) return;
     const timer = setTimeout(() => {
       try {
-        localStorage.setItem('school:classes_buffer', JSON.stringify(classes));
+        writeClassesBuffer(classes, classesRevision.current);
       } catch { /* storage full or unavailable */ }
     }, 1000);
     return () => clearTimeout(timer);
@@ -1304,7 +1409,16 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     const nextName = (updates.name ?? oldName).trim();
     const nextPapers = updates.papers ?? subject.papers;
 
-    setClasses((prev) => {
+    // Assigning a teacher is the only edit here that the server can persist on
+    // its own: /assignments/teacher writes that one field against a fresh read
+    // of the state, so it cannot drop anything else. When that is all this call
+    // changes, keeping the blob dirty would rewrite the whole ~900 KB classes
+    // array for a change that is already stored.
+    const teacherOnly = Object.keys(updates).every((key) => key === 'teacherId' || key === 'initials')
+      && (updates.teacherId !== undefined || updates.initials !== undefined);
+
+    const persistLocal = teacherOnly ? setClassesFromMark : setClasses;
+    persistLocal((prev) => {
       const next = prev.map((cls, index) => {
         if (index !== classIndex) return cls;
 
@@ -1363,9 +1477,6 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
           }),
         };
       });
-      setDirty(d => ({ ...d, classes: true }));
-      localStorage.setItem("school:classes_buffer", JSON.stringify(next));
-      lastUpdate.current.classes = Date.now();
       return next;
     });
 
@@ -1385,9 +1496,13 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         });
         if (!response.ok) {
           console.error('Failed to update subject teacher remotely:', response.statusText);
+          // The targeted write did not land, so put the edit back on the blob
+          // path instead of leaving it stranded in this tab.
+          setDirty(d => ({ ...d, classes: true }));
         }
       } catch (e) {
         console.error('Failed to update subject teacher remotely:', e);
+        setDirty(d => ({ ...d, classes: true }));
       }
     }
 
@@ -1401,7 +1516,7 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         return nextCatalog;
       });
     }
-  }, [classes, setClasses, setCatalog, API_URL]);
+  }, [classes, setClasses, setClassesFromMark, setCatalog, API_URL]);
 
   const addStudentToStream = useCallback((classIndex: number, streamName: string, student: Omit<Student, 'id' | 'subjects'> & { subjects?: string[] }) => {
     setClasses((prev) => prev.map((cls, index) => {
@@ -1435,7 +1550,17 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     const student = stream.students[studentIndex];
     if (!student) return;
 
-    setClasses((prev) => {
+    // /students/update persists exactly these two fields, against a fresh read,
+    // so when they are the only thing this call changes there is nothing left
+    // for the blob to carry and no reason to rewrite it. `subjects` has to be
+    // present for that: without it the local copy falls back to the whole stream
+    // subject list while the server keeps the student's own list, and only the
+    // blob save makes the two agree.
+    const subjectsOnly = updates.subjects !== undefined
+      && Object.keys(updates).every((key) => key === 'subjects' || key === 'optionalSubjects');
+
+    const persistLocal = subjectsOnly ? setClassesFromMark : setClasses;
+    persistLocal((prev) => {
       const next = prev.map((cls, index) => {
         if (index !== classIndex) return cls;
         return {
@@ -1459,9 +1584,6 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
           }),
         };
       });
-      setDirty(d => ({ ...d, classes: true }));
-      localStorage.setItem("school:classes_buffer", JSON.stringify(next));
-      lastUpdate.current.classes = Date.now();
       return next;
     });
 
@@ -1478,12 +1600,16 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
         });
         if (!response.ok) {
           console.error('Failed to update student subjects remotely:', response.statusText);
+          // The targeted write did not land, so put the edit back on the blob
+          // path instead of leaving it stranded in this tab.
+          setDirty(d => ({ ...d, classes: true }));
         }
       } catch (e) {
         console.error('Failed to update student subjects remotely:', e);
+        setDirty(d => ({ ...d, classes: true }));
       }
     }
-  }, [classes, setClasses, API_URL]);
+  }, [classes, setClasses, setClassesFromMark, API_URL]);
 
   const removeStudentFromStream = useCallback((classIndex: number, streamName: string, studentIndex: number) => {
     setClasses((prev) => prev.map((cls, index) => {
@@ -1527,7 +1653,9 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
     const selectedClass = classes[classIndex];
     if (!selectedClass) return;
 
-    setClasses((prev) => {
+    // The class teacher is a single field, and /assignments/teacher writes it
+    // against a fresh read, so this needs no blob save behind it.
+    setClassesFromMark((prev) => {
       const next = prev.map((cls, index) => {
         if (index !== classIndex) return cls;
         return {
@@ -1537,9 +1665,6 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
           )),
         };
       });
-      setDirty(d => ({ ...d, classes: true }));
-      localStorage.setItem("school:classes_buffer", JSON.stringify(next));
-      lastUpdate.current.classes = Date.now();
       return next;
     });
 
@@ -1556,11 +1681,15 @@ export function SchoolDataProvider({ children }: { children: React.ReactNode }) 
       });
       if (!response.ok) {
         console.error('Failed to update class teacher remotely:', response.statusText);
+        // The targeted write did not land, so put the edit back on the blob path
+        // instead of leaving it stranded in this tab.
+        setDirty(d => ({ ...d, classes: true }));
       }
     } catch (e) {
       console.error('Failed to update class teacher remotely:', e);
+      setDirty(d => ({ ...d, classes: true }));
     }
-  }, [classes, setClasses, API_URL]);
+  }, [classes, setClassesFromMark, API_URL]);
 
   const addAssessmentToClass = useCallback((
     classIndex: number,
